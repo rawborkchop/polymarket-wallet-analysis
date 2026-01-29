@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Polymarket Analytics</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        primary: { 400: '#38bdf8', 500: '#0ea5e9', 600: '#0284c7' },
+                        dark: { 700: '#2d2d3d', 800: '#1e1e2e', 900: '#11111b' }
+                    }
+                }
+            }
+        }
+    </script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        * { scrollbar-width: thin; scrollbar-color: rgba(155,155,155,0.3) transparent; }
+        .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 1rem; }
+        .modal-content { border-radius: 1rem; max-height: 90vh; overflow-y: auto; width: 100%; animation: modalIn 0.2s ease-out; }
+        @keyframes modalIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
+        .toast-enter { animation: slideIn 0.3s ease-out; }
+        @keyframes slideIn { from { opacity: 0; transform: translateX(100%); } to { opacity: 1; transform: translateX(0); } }
+    </style>
+</head>
+<body class="bg-dark-900 min-h-screen text-gray-200">
+    <div id="app" class="flex">
+        <!-- Sidebar -->
+        <aside :class="['fixed left-0 top-0 h-full bg-dark-800 shadow-xl z-50 transition-all duration-300 flex flex-col', sidebarOpen ? 'w-56' : 'w-16']">
+            <div class="p-4 border-b border-gray-700 flex items-center space-x-3">
+                <div class="w-9 h-9 bg-gradient-to-br from-primary-500 to-purple-600 rounded-xl flex items-center justify-center flex-shrink-0">
+                    <i class="fas fa-chart-line text-white text-sm"></i>
+                </div>
+                <span v-show="sidebarOpen" class="font-bold text-white whitespace-nowrap">Polymarket</span>
+            </div>
+            <nav class="flex-1 p-3 space-y-1">
+                <button v-for="item in navItems" :key="item.id" @click="currentView = item.id"
+                    :class="['w-full flex items-center space-x-3 px-3 py-2.5 rounded-xl transition-all',
+                        currentView === item.id ? 'bg-primary-500 text-white shadow-lg shadow-primary-500/30' : 'text-gray-400 hover:bg-dark-700']">
+                    <i :class="item.icon" class="w-5 text-center"></i>
+                    <span v-show="sidebarOpen" class="text-sm font-medium">{{ item.label }}</span>
+                </button>
+            </nav>
+            <div class="p-3 border-t border-gray-700">
+                <button @click="sidebarOpen = !sidebarOpen" class="w-full flex items-center justify-center px-3 py-2 rounded-lg text-gray-400 hover:bg-dark-700">
+                    <i :class="['fas', sidebarOpen ? 'fa-chevron-left' : 'fa-chevron-right']"></i>
+                </button>
+            </div>
+        </aside>
+
+        <!-- Main -->
+        <main :class="['flex-1 transition-all duration-300', sidebarOpen ? 'ml-56' : 'ml-16']">
+            <!-- Header -->
+            <header class="sticky top-0 z-40 bg-dark-800/90 backdrop-blur border-b border-gray-700">
+                <div class="flex items-center justify-between px-6 py-4">
+                    <div>
+                        <h1 class="text-xl font-bold text-white">{{ currentViewTitle }}</h1>
+                        <p class="text-sm text-gray-500">{{ currentTime }}</p>
+                    </div>
+                    <div class="flex items-center space-x-3">
+                        <div class="flex items-center space-x-2 px-3 py-1.5 rounded-full bg-green-900/30">
+                            <span class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                            <span class="text-xs font-medium text-green-400">Live</span>
+                        </div>
+                        <button @click="refreshData" :class="['p-2 rounded-lg text-gray-400 hover:bg-dark-700', isLoading ? 'animate-spin' : '']">
+                            <i class="fas fa-sync-alt"></i>
+                        </button>
+                        <button @click="showAddWalletModal = true" class="px-4 py-2 bg-gradient-to-r from-primary-500 to-purple-600 text-white rounded-xl font-medium hover:shadow-lg hover:shadow-primary-500/25 transition-all text-sm">
+                            <i class="fas fa-plus mr-2"></i>Add Wallet
+                        </button>
+                    </div>
+                </div>
+            </header>
+
+            <div class="p-6">
+                <!-- DASHBOARD -->
+                <div v-if="currentView === 'dashboard'" class="space-y-6">
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                        <div v-for="stat in dashboardStats" :key="stat.label" class="bg-dark-800 rounded-2xl p-5 hover:scale-[1.02] transition-transform">
+                            <div class="flex items-center justify-between">
+                                <div>
+                                    <p class="text-sm text-gray-400">{{ stat.label }}</p>
+                                    <p class="text-2xl font-bold text-white mt-1">{{ stat.value }}</p>
+                                </div>
+                                <div :class="['w-11 h-11 rounded-xl flex items-center justify-center', stat.bgColor]">
+                                    <i :class="[stat.icon, stat.iconColor, 'text-lg']"></i>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <div class="bg-dark-800 rounded-2xl p-6">
+                            <h3 class="text-lg font-semibold text-white mb-4">Trading Volume</h3>
+                            <div class="h-64"><canvas ref="dashboardVolumeChart"></canvas></div>
+                        </div>
+                        <div class="bg-dark-800 rounded-2xl p-6">
+                            <h3 class="text-lg font-semibold text-white mb-4">Top Wallets by P&L</h3>
+                            <div class="space-y-3">
+                                <div v-for="wallet in topWallets" :key="wallet.id" @click="goToWallet(wallet)"
+                                    class="flex items-center justify-between p-3 rounded-xl bg-dark-700 hover:bg-dark-900 cursor-pointer transition-colors">
+                                    <div class="flex items-center space-x-3">
+                                        <div class="w-10 h-10 rounded-full bg-gradient-to-br from-primary-400 to-purple-500 flex items-center justify-center text-white font-bold">
+                                            {{ wallet.address.slice(2, 4).toUpperCase() }}
+                                        </div>
+                                        <span class="font-mono text-sm text-gray-300">{{ formatAddress(wallet.address) }}</span>
+                                    </div>
+                                    <span :class="['font-bold', parseFloat(wallet.subgraph_realized_pnl) >= 0 ? 'text-green-400' : 'text-red-400']">
+                                        {{ formatCurrency(wallet.subgraph_realized_pnl) }}
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- WALLETS -->
+                <div v-if="currentView === 'wallets'" class="space-y-6">
+                    <!-- Wallet Cards -->
+                    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                        <div v-for="wallet in wallets" :key="wallet.id"
+                            :class="['bg-dark-800 rounded-2xl p-5 cursor-pointer transition-all hover:shadow-xl border-2',
+                                selectedWallet?.id === wallet.id ? 'border-primary-500' : 'border-transparent hover:border-gray-600']"
+                            @click="selectWallet(wallet)">
+                            <div class="flex items-center justify-between mb-4">
+                                <div class="flex items-center space-x-3">
+                                    <div class="w-12 h-12 rounded-full bg-gradient-to-br from-primary-400 to-purple-500 flex items-center justify-center text-white font-bold">
+                                        {{ wallet.address.slice(2, 4).toUpperCase() }}
+                                    </div>
+                                    <div>
+                                        <p class="font-medium text-white">{{ wallet.name || 'Anonymous' }}</p>
+                                        <p class="font-mono text-xs text-gray-500">{{ formatAddress(wallet.address) }}</p>
+                                    </div>
+                                </div>
+                                <div class="flex space-x-1">
+                                    <button @click.stop="refreshWalletData(wallet)" class="p-2 rounded-lg text-gray-400 hover:bg-dark-700 hover:text-white" title="Refresh">
+                                        <i class="fas fa-sync-alt text-sm"></i>
+                                    </button>
+                                    <button @click.stop="confirmDeleteWallet(wallet)" class="p-2 rounded-lg text-gray-400 hover:bg-red-900/50 hover:text-red-400" title="Delete">
+                                        <i class="fas fa-trash text-sm"></i>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="grid grid-cols-3 gap-2 text-center">
+                                <div class="bg-dark-700 rounded-lg p-2">
+                                    <p class="text-xs text-gray-500">P&L</p>
+                                    <p :class="['font-bold text-sm', parseFloat(wallet.subgraph_realized_pnl) >= 0 ? 'text-green-400' : 'text-red-400']">
+                                        {{ formatCurrency(wallet.subgraph_realized_pnl) }}
+                                    </p>
+                                </div>
+                                <div class="bg-dark-700 rounded-lg p-2">
+                                    <p class="text-xs text-gray-500">Positions</p>
+                                    <p class="font-bold text-sm text-white">{{ wallet.subgraph_total_positions || 0 }}</p>
+                                </div>
+                                <div class="bg-dark-700 rounded-lg p-2">
+                                    <p class="text-xs text-gray-500">Trades</p>
+                                    <p class="font-bold text-sm text-white">{{ wallet.trades_count || 0 }}</p>
+                                </div>
+                            </div>
+                            <!-- Date Range indicator -->
+                            <div v-if="wallet.data_start_date && wallet.data_end_date" class="mt-3 pt-3 border-t border-gray-700">
+                                <div class="flex items-center justify-between text-xs text-gray-500">
+                                    <span><i class="fas fa-calendar-alt mr-1"></i>{{ formatDate(wallet.data_start_date) }}</span>
+                                    <span class="text-primary-400">{{ getTimelineData(wallet)?.daysCovered }} days</span>
+                                    <span>{{ formatDate(wallet.data_end_date) }}</span>
+                                </div>
+                            </div>
+                            <div v-else class="mt-3 pt-3 border-t border-gray-700 text-xs text-gray-600 text-center">
+                                <i class="fas fa-info-circle mr-1"></i>No data range yet
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Wallet Detail Panel -->
+                    <div v-if="selectedWallet && walletStats" class="bg-dark-800 rounded-2xl p-6 space-y-6">
+                        <div class="flex items-center justify-between">
+                            <div class="flex items-center space-x-4">
+                                <div class="w-14 h-14 rounded-full bg-gradient-to-br from-primary-400 to-purple-500 flex items-center justify-center text-white font-bold text-xl">
+                                    {{ selectedWallet.address.slice(2, 4).toUpperCase() }}
+                                </div>
+                                <div>
+                                    <h2 class="text-xl font-bold text-white">{{ selectedWallet.name || 'Anonymous Trader' }}</h2>
+                                    <p class="font-mono text-sm text-gray-400">{{ selectedWallet.address }}</p>
+                                </div>
+                            </div>
+                            <button @click="selectedWallet = null; walletStats = null" class="p-2 text-gray-400 hover:text-white">
+                                <i class="fas fa-times text-lg"></i>
+                            </button>
+                        </div>
+
+                        <!-- Key Metrics -->
+                        <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
+                            <div class="bg-dark-700 rounded-xl p-4 text-center">
+                                <p class="text-xs text-gray-500 mb-1">Realized P&L</p>
+                                <p :class="['text-xl font-bold', walletStats.wallet.subgraph_realized_pnl >= 0 ? 'text-green-400' : 'text-red-400']">
+                                    {{ formatCurrency(walletStats.wallet.subgraph_realized_pnl) }}
+                                </p>
+                            </div>
+                            <div class="bg-dark-700 rounded-xl p-4 text-center">
+                                <p class="text-xs text-gray-500 mb-1">ROI</p>
+                                <p :class="['text-xl font-bold', walletStats.wallet.roi_percent >= 0 ? 'text-green-400' : 'text-red-400']">
+                                    {{ walletStats.wallet.roi_percent }}%
+                                </p>
+                            </div>
+                            <div class="bg-dark-700 rounded-xl p-4 text-center">
+                                <p class="text-xs text-gray-500 mb-1">Total Bought</p>
+                                <p class="text-xl font-bold text-white">{{ formatCurrency(walletStats.wallet.subgraph_total_bought) }}</p>
+                            </div>
+                            <div class="bg-dark-700 rounded-xl p-4 text-center">
+                                <p class="text-xs text-gray-500 mb-1">Win Rate</p>
+                                <p class="text-xl font-bold text-orange-400">{{ walletStats.analysis_metrics?.win_rate_percent ? walletStats.analysis_metrics.win_rate_percent.toFixed(1) + '%' : 'N/A' }}</p>
+                            </div>
+                            <div class="bg-dark-700 rounded-xl p-4 text-center">
+                                <p class="text-xs text-gray-500 mb-1">Trades</p>
+                                <p class="text-xl font-bold text-white">{{ walletStats.total_trades }}</p>
+                            </div>
+                            <div class="bg-dark-700 rounded-xl p-4 text-center">
+                                <p class="text-xs text-gray-500 mb-1">Buy / Sell</p>
+                                <p class="text-xl font-bold"><span class="text-green-400">{{ walletStats.total_buys }}</span> / <span class="text-red-400">{{ walletStats.total_sells }}</span></p>
+                            </div>
+                        </div>
+
+                        <!-- Date Range Timeline -->
+                        <div class="bg-dark-700 rounded-xl p-4">
+                            <div class="flex items-center justify-between mb-3">
+                                <h4 class="text-sm font-semibold text-gray-300">
+                                    <i class="fas fa-calendar-alt mr-2 text-primary-400"></i>Data Range
+                                </h4>
+                                <div class="flex items-center space-x-2">
+                                    <span class="text-xs text-gray-500">Extend by:</span>
+                                    <select v-model="extendDays" class="px-2 py-1 rounded-lg border border-gray-600 bg-dark-800 text-gray-300 text-xs">
+                                        <option :value="7">7 days</option>
+                                        <option :value="14">14 days</option>
+                                        <option :value="30">30 days</option>
+                                        <option :value="60">60 days</option>
+                                        <option :value="90">90 days</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div v-if="walletStats.wallet.data_start_date && walletStats.wallet.data_end_date" class="space-y-3">
+                                <!-- Timeline Bar with extend buttons -->
+                                <div class="flex items-center space-x-2">
+                                    <button @click="extendRange(selectedWallet, 'backward')" :disabled="isExtendingRange"
+                                        class="px-3 py-1.5 rounded-lg bg-dark-800 text-primary-400 hover:bg-primary-900/30 transition-colors text-sm font-medium disabled:opacity-50 flex items-center"
+                                        title="Fetch older data">
+                                        <i class="fas fa-chevron-left mr-1"></i>
+                                        <span class="hidden sm:inline">Earlier</span>
+                                    </button>
+
+                                    <div class="flex-1 relative">
+                                        <div class="h-8 bg-dark-800 rounded-lg overflow-hidden relative cursor-pointer" @click="showAllData" title="Click to show all data">
+                                            <div class="absolute inset-y-0 left-1/4 right-1/4 bg-gradient-to-r from-primary-600 to-purple-600 flex items-center justify-center">
+                                                <span class="text-xs font-medium text-white px-2 truncate">
+                                                    {{ getTimelineData(selectedWallet)?.daysCovered }} days
+                                                </span>
+                                            </div>
+                                        </div>
+                                        <div class="flex justify-between mt-1 text-xs text-gray-500">
+                                            <span>{{ walletStats.wallet.data_start_date }}</span>
+                                            <span>{{ walletStats.wallet.data_end_date }}</span>
+                                        </div>
+                                    </div>
+
+                                    <button @click="extendRange(selectedWallet, 'forward')" :disabled="isExtendingRange || getTimelineData(selectedWallet)?.isUpToDate"
+                                        class="px-3 py-1.5 rounded-lg bg-dark-800 text-primary-400 hover:bg-primary-900/30 transition-colors text-sm font-medium disabled:opacity-50 flex items-center"
+                                        title="Fetch newer data">
+                                        <span class="hidden sm:inline">Later</span>
+                                        <i class="fas fa-chevron-right ml-1"></i>
+                                    </button>
+                                </div>
+
+                                <!-- Quick Chart Filters -->
+                                <div class="flex flex-wrap items-center gap-2">
+                                    <span class="text-xs text-gray-500">Show charts:</span>
+                                    <button @click="showAllData" :class="['px-2 py-1 rounded text-xs transition-colors', !chartStartDate ? 'bg-primary-600 text-white' : 'bg-dark-800 text-gray-400 hover:text-white']">
+                                        All
+                                    </button>
+                                    <button @click="showLastNDays(7)" class="px-2 py-1 rounded bg-dark-800 text-gray-400 hover:text-white text-xs transition-colors">
+                                        7d
+                                    </button>
+                                    <button @click="showLastNDays(14)" class="px-2 py-1 rounded bg-dark-800 text-gray-400 hover:text-white text-xs transition-colors">
+                                        14d
+                                    </button>
+                                    <button @click="showLastNDays(30)" class="px-2 py-1 rounded bg-dark-800 text-gray-400 hover:text-white text-xs transition-colors">
+                                        30d
+                                    </button>
+                                    <button @click="showLastNDays(60)" class="px-2 py-1 rounded bg-dark-800 text-gray-400 hover:text-white text-xs transition-colors">
+                                        60d
+                                    </button>
+                                    <button @click="showLastNDays(90)" class="px-2 py-1 rounded bg-dark-800 text-gray-400 hover:text-white text-xs transition-colors">
+                                        90d
+                                    </button>
+                                </div>
+
+                                <!-- Status info -->
+                                <div class="flex items-center justify-between text-xs">
+                                    <span v-if="isExtendingRange" class="text-primary-400">
+                                        <i class="fas fa-spinner animate-spin mr-1"></i>Fetching data... (auto-refresh when done)
+                                    </span>
+                                    <span v-else-if="getTimelineData(selectedWallet)?.isUpToDate" class="text-green-400">
+                                        <i class="fas fa-check-circle mr-1"></i>Up to date
+                                    </span>
+                                    <span v-else class="text-yellow-400">
+                                        <i class="fas fa-clock mr-1"></i>{{ getTimelineData(selectedWallet)?.daysToToday }} days behind
+                                    </span>
+                                    <span class="text-gray-500">Last updated: {{ formatDateTime(walletStats.wallet.last_updated) }}</span>
+                                </div>
+                            </div>
+
+                            <div v-else class="text-center py-4 text-gray-500">
+                                <i class="fas fa-info-circle mr-2"></i>No data range available. Refresh the wallet to fetch trades.
+                            </div>
+                        </div>
+
+                        <!-- P&L Info Note -->
+                        <div class="bg-blue-900/20 border border-blue-800/50 rounded-xl p-3 text-xs text-blue-300">
+                            <i class="fas fa-info-circle mr-2"></i>
+                            <strong>P&L Data:</strong>
+                            <span v-if="walletStats.period_pnl">
+                                Period P&L: <span :class="walletStats.period_pnl.calculated_pnl >= 0 ? 'text-green-400' : 'text-red-400'">
+                                    {{ formatCurrency(walletStats.period_pnl.calculated_pnl) }}
+                                </span>
+                                ({{ walletStats.period_pnl.data_coverage_percent }}% of lifetime data).
+                                Lifetime P&L: {{ formatCurrency(walletStats.wallet.subgraph_realized_pnl) }}.
+                            </span>
+                            <span v-else>
+                                Lifetime P&L from Polymarket subgraph: {{ formatCurrency(walletStats.wallet.subgraph_realized_pnl) }}
+                            </span>
+                        </div>
+
+                        <!-- Charts Row -->
+                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                            <div>
+                                <h4 class="text-sm font-semibold text-gray-300 mb-3">
+                                    <i class="fas fa-chart-line mr-2 text-primary-400"></i>Cumulative P&L
+                                    <span class="text-xs text-gray-500 ml-2">(for analyzed period)</span>
+                                </h4>
+                                <div class="h-48 bg-dark-700 rounded-xl p-3"><canvas ref="pnlChart"></canvas></div>
+                            </div>
+                            <div>
+                                <h4 class="text-sm font-semibold text-gray-300 mb-3"><i class="fas fa-chart-bar mr-2 text-primary-400"></i>Daily Volume</h4>
+                                <div class="h-48 bg-dark-700 rounded-xl p-3"><canvas ref="volumeChart"></canvas></div>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                            <div>
+                                <h4 class="text-sm font-semibold text-gray-300 mb-3"><i class="fas fa-chart-pie mr-2 text-primary-400"></i>Activity Distribution</h4>
+                                <div class="h-48 bg-dark-700 rounded-xl p-3"><canvas ref="buySellChart"></canvas></div>
+                            </div>
+                            <div>
+                                <h4 class="text-sm font-semibold text-gray-300 mb-3"><i class="fas fa-trophy mr-2 text-primary-400"></i>P&L by Market</h4>
+                                <div class="h-48 bg-dark-700 rounded-xl p-3"><canvas ref="marketPnlChart"></canvas></div>
+                            </div>
+                        </div>
+
+                        <!-- P&L by Market Table -->
+                        <div>
+                            <h4 class="text-sm font-semibold text-gray-300 mb-3">Top Markets by Volume</h4>
+                            <div class="overflow-x-auto">
+                                <table class="w-full text-sm">
+                                    <thead>
+                                        <tr class="text-left text-gray-500 border-b border-gray-700">
+                                            <th class="pb-2">Market</th>
+                                            <th class="pb-2 text-right">Trades</th>
+                                            <th class="pb-2 text-right">Buy Vol</th>
+                                            <th class="pb-2 text-right">Sell Vol</th>
+                                            <th class="pb-2 text-right">Est. P&L</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr v-for="m in walletStats.pnl_by_market" :key="m.market__condition_id" class="border-b border-gray-800">
+                                            <td class="py-2 text-gray-300 truncate max-w-xs">{{ m.market__title || 'Unknown' }}</td>
+                                            <td class="py-2 text-right text-gray-400">{{ m.trade_count }}</td>
+                                            <td class="py-2 text-right text-green-400">${{ m.buy_volume.toFixed(0) }}</td>
+                                            <td class="py-2 text-right text-red-400">${{ m.sell_volume.toFixed(0) }}</td>
+                                            <td :class="['py-2 text-right font-medium', m.estimated_pnl >= 0 ? 'text-green-400' : 'text-red-400']">
+                                                {{ formatCurrency(m.estimated_pnl) }}
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <!-- Copy Trading -->
+                        <div v-if="walletStats.copy_trading">
+                            <h4 class="text-sm font-semibold text-gray-300 mb-3"><i class="fas fa-copy mr-2 text-primary-400"></i>Copy Trading Simulation</h4>
+                            <div class="overflow-x-auto">
+                                <table class="w-full text-sm">
+                                    <thead>
+                                        <tr class="text-left text-gray-500 border-b border-gray-700">
+                                            <th class="pb-2">Slippage</th>
+                                            <th class="pb-2 text-right">Original P&L</th>
+                                            <th class="pb-2 text-right">Copy P&L</th>
+                                            <th class="pb-2 text-right">Difference</th>
+                                            <th class="pb-2 text-center">Profitable</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr v-for="s in walletStats.copy_trading.scenarios" :key="s.slippage_value" class="border-b border-gray-800">
+                                            <td class="py-2 text-gray-300">{{ s.slippage_value }}{{ s.slippage_mode === 'percentage' ? '%' : ' pts' }}</td>
+                                            <td :class="['py-2 text-right', s.original_pnl_usd >= 0 ? 'text-green-400' : 'text-red-400']">{{ formatCurrency(s.original_pnl_usd) }}</td>
+                                            <td :class="['py-2 text-right', s.estimated_copy_pnl_usd >= 0 ? 'text-green-400' : 'text-red-400']">{{ formatCurrency(s.estimated_copy_pnl_usd) }}</td>
+                                            <td :class="['py-2 text-right', s.pnl_difference_usd >= 0 ? 'text-green-400' : 'text-red-400']">{{ formatCurrency(s.pnl_difference_usd) }} ({{ s.pnl_difference_percent.toFixed(1) }}%)</td>
+                                            <td class="py-2 text-center">
+                                                <span :class="['px-2 py-1 rounded-full text-xs', s.profitable ? 'bg-green-900/50 text-green-400' : 'bg-red-900/50 text-red-400']">
+                                                    {{ s.profitable ? 'Yes' : 'No' }}
+                                                </span>
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <!-- Recent Trades -->
+                        <div>
+                            <div class="flex items-center justify-between mb-3">
+                                <h4 class="text-sm font-semibold text-gray-300">Recent Trades</h4>
+                                <select v-model="walletTradeFilter" class="px-3 py-1.5 rounded-lg border border-gray-600 bg-dark-700 text-gray-200 text-sm">
+                                    <option value="all">All</option>
+                                    <option value="BUY">Buys</option>
+                                    <option value="SELL">Sells</option>
+                                </select>
+                            </div>
+                            <div class="overflow-x-auto">
+                                <table class="w-full text-sm">
+                                    <thead>
+                                        <tr class="text-left text-gray-500 border-b border-gray-700">
+                                            <th class="pb-2">Time</th>
+                                            <th class="pb-2">Market</th>
+                                            <th class="pb-2">Side</th>
+                                            <th class="pb-2 text-right">Size</th>
+                                            <th class="pb-2 text-right">Price</th>
+                                            <th class="pb-2 text-right">Value</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr v-for="t in filteredWalletTrades.slice(0, 20)" :key="t.id" class="border-b border-gray-800 hover:bg-dark-700">
+                                            <td class="py-2 text-gray-500">{{ formatDateTime(t.datetime) }}</td>
+                                            <td class="py-2 text-gray-300 truncate max-w-xs">{{ t.market_title }}</td>
+                                            <td class="py-2">
+                                                <span :class="['px-2 py-0.5 rounded text-xs font-medium', t.side === 'BUY' ? 'bg-green-900/50 text-green-400' : 'bg-red-900/50 text-red-400']">
+                                                    {{ t.side }}
+                                                </span>
+                                            </td>
+                                            <td class="py-2 text-right text-gray-300">{{ parseFloat(t.size).toFixed(2) }}</td>
+                                            <td class="py-2 text-right text-gray-300">${{ parseFloat(t.price).toFixed(3) }}</td>
+                                            <td class="py-2 text-right text-white font-medium">${{ parseFloat(t.total_value).toFixed(2) }}</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div v-else-if="!selectedWallet" class="bg-dark-800 rounded-2xl p-12 text-center">
+                        <i class="fas fa-hand-pointer text-4xl text-gray-600 mb-4"></i>
+                        <p class="text-gray-500">Select a wallet above to view detailed analysis</p>
+                    </div>
+                </div>
+
+                <!-- TRADES VIEW -->
+                <div v-if="currentView === 'trades'" class="bg-dark-800 rounded-2xl p-6">
+                    <div class="flex flex-wrap items-center gap-4 mb-6">
+                        <select v-model="selectedTradeWallet" class="px-4 py-2.5 rounded-xl border border-gray-600 bg-dark-700 text-gray-200">
+                            <option value="">All Wallets</option>
+                            <option v-for="w in wallets" :key="w.id" :value="w.id">{{ formatAddress(w.address) }}</option>
+                        </select>
+                        <select v-model="tradeFilterSide" class="px-4 py-2.5 rounded-xl border border-gray-600 bg-dark-700 text-gray-200">
+                            <option value="">All Sides</option>
+                            <option value="BUY">Buy</option>
+                            <option value="SELL">Sell</option>
+                        </select>
+                        <input v-model="tradeSearch" type="text" placeholder="Search markets..."
+                            class="flex-1 min-w-48 px-4 py-2.5 rounded-xl border border-gray-600 bg-dark-700 text-gray-200 placeholder-gray-500 outline-none focus:ring-2 focus:ring-primary-500">
+                        <button @click="exportTrades" class="px-4 py-2 bg-dark-700 text-gray-300 rounded-xl font-medium hover:bg-dark-900 transition-all text-sm">
+                            <i class="fas fa-download mr-2"></i>Export CSV
+                        </button>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-sm">
+                            <thead>
+                                <tr class="text-left text-gray-500 border-b border-gray-700">
+                                    <th class="pb-3">Time</th>
+                                    <th class="pb-3">Wallet</th>
+                                    <th class="pb-3">Market</th>
+                                    <th class="pb-3">Side</th>
+                                    <th class="pb-3 text-right">Size</th>
+                                    <th class="pb-3 text-right">Price</th>
+                                    <th class="pb-3 text-right">Value</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="t in paginatedTrades" :key="t.id" class="border-b border-gray-800 hover:bg-dark-700">
+                                    <td class="py-3 text-gray-500">{{ formatDateTime(t.datetime) }}</td>
+                                    <td class="py-3 font-mono text-gray-400">{{ formatAddress(t.wallet_address) }}</td>
+                                    <td class="py-3 text-gray-300 truncate max-w-xs">{{ t.market_title }}</td>
+                                    <td class="py-3">
+                                        <span :class="['px-2 py-0.5 rounded text-xs font-medium', t.side === 'BUY' ? 'bg-green-900/50 text-green-400' : 'bg-red-900/50 text-red-400']">{{ t.side }}</span>
+                                    </td>
+                                    <td class="py-3 text-right text-gray-300">{{ parseFloat(t.size).toFixed(2) }}</td>
+                                    <td class="py-3 text-right text-gray-300">${{ parseFloat(t.price).toFixed(3) }}</td>
+                                    <td class="py-3 text-right text-white font-medium">${{ parseFloat(t.total_value).toFixed(2) }}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="flex items-center justify-between mt-4 pt-4 border-t border-gray-700">
+                        <p class="text-sm text-gray-500">{{ filteredTrades.length }} trades</p>
+                        <div class="flex items-center space-x-2">
+                            <button @click="tradePage--" :disabled="tradePage === 1" class="px-3 py-1 rounded border border-gray-700 text-sm disabled:opacity-50 text-gray-400">
+                                <i class="fas fa-chevron-left"></i>
+                            </button>
+                            <span class="text-sm text-gray-400">{{ tradePage }} / {{ totalTradePages }}</span>
+                            <button @click="tradePage++" :disabled="tradePage >= totalTradePages" class="px-3 py-1 rounded border border-gray-700 text-sm disabled:opacity-50 text-gray-400">
+                                <i class="fas fa-chevron-right"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Add Wallet Modal -->
+        <div v-if="showAddWalletModal" class="modal-overlay" @click.self="showAddWalletModal = false">
+            <div class="modal-content max-w-md p-6 bg-dark-800">
+                <div class="flex items-center justify-between mb-6">
+                    <h2 class="text-xl font-bold text-white">Add Wallet</h2>
+                    <button @click="showAddWalletModal = false" class="text-gray-400 hover:text-white"><i class="fas fa-times"></i></button>
+                </div>
+                <form @submit.prevent="addWallet" class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-1">Wallet Address</label>
+                        <input v-model="newWalletAddress" type="text" required placeholder="0x..."
+                            class="w-full px-4 py-2.5 rounded-xl border border-gray-600 bg-dark-700 text-gray-200 placeholder-gray-500 outline-none focus:ring-2 focus:ring-primary-500 font-mono">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-1">Name (optional)</label>
+                        <input v-model="newWalletName" type="text" placeholder="e.g. Whale #1"
+                            class="w-full px-4 py-2.5 rounded-xl border border-gray-600 bg-dark-700 text-gray-200 placeholder-gray-500 outline-none focus:ring-2 focus:ring-primary-500">
+                    </div>
+                    <div v-if="addWalletError" class="p-3 rounded-lg bg-red-900/30 text-red-400 text-sm">{{ addWalletError }}</div>
+                    <div class="flex justify-end space-x-3 pt-2">
+                        <button type="button" @click="showAddWalletModal = false" class="px-5 py-2.5 bg-dark-700 text-gray-300 rounded-xl font-medium hover:bg-dark-900">Cancel</button>
+                        <button type="submit" :disabled="isAddingWallet" class="px-5 py-2.5 bg-gradient-to-r from-primary-500 to-purple-600 text-white rounded-xl font-medium hover:shadow-lg disabled:opacity-50">
+                            <i v-if="isAddingWallet" class="fas fa-spinner animate-spin mr-2"></i>{{ isAddingWallet ? 'Adding...' : 'Add Wallet' }}
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Delete Confirmation Modal -->
+        <div v-if="showDeleteModal" class="modal-overlay" @click.self="showDeleteModal = false">
+            <div class="modal-content max-w-sm p-6 bg-dark-800">
+                <h2 class="text-xl font-bold text-white mb-4">Delete Wallet?</h2>
+                <p class="text-gray-400 mb-6">Are you sure you want to remove <span class="font-mono text-gray-300">{{ walletToDelete?.address.slice(0, 10) }}...</span> from tracking?</p>
+                <div class="flex justify-end space-x-3">
+                    <button @click="showDeleteModal = false" class="px-4 py-2 bg-dark-700 text-gray-300 rounded-xl">Cancel</button>
+                    <button @click="deleteWallet" class="px-4 py-2 bg-red-600 text-white rounded-xl hover:bg-red-700">Delete</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Toasts -->
+        <div class="fixed bottom-6 right-6 space-y-2 z-50">
+            <div v-for="toast in toasts" :key="toast.id"
+                :class="['px-4 py-3 rounded-xl shadow-lg flex items-center space-x-3 toast-enter',
+                    toast.type === 'success' ? 'bg-green-600' : toast.type === 'error' ? 'bg-red-600' : 'bg-primary-600']">
+                <i :class="['fas text-white', toast.type === 'success' ? 'fa-check-circle' : toast.type === 'error' ? 'fa-exclamation-circle' : 'fa-info-circle']"></i>
+                <span class="text-white font-medium text-sm">{{ toast.message }}</span>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/api.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

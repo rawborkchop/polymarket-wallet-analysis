@@ -174,10 +174,10 @@ class AnalyticsService(IAnalyzer):
             condition_id = data["condition_id"]
             outcome = data["outcome"]
 
-            total_bought = sum(t.size for t in buys)
-            total_sold = sum(t.size for t in sells)
-            total_buy_cost = sum(t.total_value for t in buys)
-            total_sell_revenue = sum(t.total_value for t in sells)
+            total_bought = float(sum(t.size for t in buys))
+            total_sold = float(sum(t.size for t in sells))
+            total_buy_cost = float(sum(t.total_value for t in buys))
+            total_sell_revenue = float(sum(t.total_value for t in sells))
 
             # Get resolution info
             resolution = resolutions.get(condition_id, {})
@@ -207,9 +207,9 @@ class AnalyticsService(IAnalyzer):
         buys = [t for t in trades if t.is_buy]
         sells = [t for t in trades if t.is_sell]
 
-        total_volume = sum(t.total_value for t in trades)
-        total_buy_volume = sum(t.total_value for t in buys)
-        total_sell_volume = sum(t.total_value for t in sells)
+        total_volume = float(sum(t.total_value for t in trades))
+        total_buy_volume = float(sum(t.total_value for t in buys))
+        total_sell_volume = float(sum(t.total_value for t in sells))
 
         unique_markets = len(set(t.condition_id for t in trades))
 
@@ -275,7 +275,7 @@ class AnalyticsService(IAnalyzer):
 
         for trade in trades:
             market_data[trade.condition_id]["trades"] += 1
-            market_data[trade.condition_id]["volume"] += trade.total_value
+            market_data[trade.condition_id]["volume"] += float(trade.total_value)
             market_data[trade.condition_id]["title"] = trade.title
 
         for key, pos in positions.items():
@@ -307,7 +307,7 @@ class AnalyticsService(IAnalyzer):
         for trade in trades:
             day = trade.datetime.strftime("%Y-%m-%d")
             trades_by_day[day] += 1
-            volume_by_day[day] += trade.total_value
+            volume_by_day[day] += float(trade.total_value)
 
         active_days = len(trades_by_day)
         avg_trades_per_day = len(trades) / active_days if active_days > 0 else 0

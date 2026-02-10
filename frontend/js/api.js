@@ -84,6 +84,13 @@ class ApiService {
         });
     }
 
+    async updateWallet(id, data) {
+        return this.request(`/wallets/${id}/update/`, {
+            method: 'PATCH',
+            body: JSON.stringify(data),
+        });
+    }
+
     async extendWalletRange(id, options) {
         // options: { direction: 'backward'|'forward', days: 30 }
         // or: { start_date: '2024-01-01', end_date: '2024-01-31' }
@@ -91,6 +98,11 @@ class ApiService {
             method: 'POST',
             body: JSON.stringify(options),
         });
+    }
+
+    // Task status
+    async getTaskStatus(taskId) {
+        return this.request(`/tasks/${taskId}/`);
     }
 
     // Trades

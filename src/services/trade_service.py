@@ -1,7 +1,8 @@
+from decimal import Decimal
 from typing import List, Dict, Optional, Any
 from collections import defaultdict
 
-from src.api.models import Trade, TradeSide
+from src.api.models import Trade, TradeSide, to_decimal
 from src.interfaces.trade_fetcher import ITradeFetcher
 
 
@@ -34,90 +35,91 @@ class TradeService:
         before_timestamp: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Fetch all activity (TRADE + REDEEM + SPLIT + MERGE) for a wallet.
+        Fetch all activity (TRADE + REDEEM + SPLIT + MERGE + REWARD + CONVERSION) for a wallet.
 
         Returns:
-            Dict with 'trades' list (Trade objects including REDEEMs as sells),
+            Dict with 'trades' list (Trade objects - BUY/SELL only, NO redeems),
             'raw_activity' dict with categorized raw data,
-            and 'cash_flow' dict for P&L calculation.
+            and 'cash_flow' dict with summary statistics.
+
+        IMPORTANT: REDEEMs are NOT converted to trades. They are stored separately
+        as Activity records. The P&L calculation is done by pnl_calculator.py
+        which combines trades AND activities.
         """
         # Get all activity types
         raw_activity = self._trade_fetcher.fetch_all_activity(
             wallet_address, after_timestamp, before_timestamp
         )
 
-        # Convert trades
+        # Convert trades (BUY/SELL only - NO redeems)
         trades = [Trade.from_api_response(t) for t in raw_activity.get("TRADE", [])]
+        trades.sort(key=lambda t: t.timestamp)
 
-        # Convert REDEEMs to trades (selling at $1)
-        redeems = [Trade.from_redeem(r) for r in raw_activity.get("REDEEM", [])]
-
-        # Combine and sort by timestamp
-        all_trades = trades + redeems
-        all_trades.sort(key=lambda t: t.timestamp)
-
-        # Calculate cash flows for accurate P&L
-        # P&L = (Sell + Redeem + Merge + Reward) - (Buy + Split)
+        # Calculate cash flows using Decimal for precision
+        # NOTE: This is NOT the source of truth for P&L - that's pnl_calculator.py
         buy_trades = [t for t in raw_activity.get("TRADE", []) if t.get("side") == "BUY"]
         sell_trades = [t for t in raw_activity.get("TRADE", []) if t.get("side") == "SELL"]
 
-        buy_cost = sum(float(t.get("size", 0)) * float(t.get("price", 0)) for t in buy_trades)
-        sell_revenue = sum(float(t.get("size", 0)) * float(t.get("price", 0)) for t in sell_trades)
+        buy_cost = sum(
+            (to_decimal(t.get("size", 0)) * to_decimal(t.get("price", 0)))
+            for t in buy_trades
+        )
+        sell_revenue = sum(
+            (to_decimal(t.get("size", 0)) * to_decimal(t.get("price", 0)))
+            for t in sell_trades
+        )
 
         # Token volumes (needed for points-based slippage calculation)
-        buy_volume_tokens = sum(float(t.get("size", 0)) for t in buy_trades)
-        sell_volume_tokens = sum(float(t.get("size", 0)) for t in sell_trades)
+        buy_volume_tokens = sum(to_decimal(t.get("size", 0)) for t in buy_trades)
+        sell_volume_tokens = sum(to_decimal(t.get("size", 0)) for t in sell_trades)
 
         redeem_revenue = sum(
-            float(r.get("usdcSize", 0)) for r in raw_activity.get("REDEEM", [])
+            to_decimal(r.get("usdcSize", 0)) for r in raw_activity.get("REDEEM", [])
         )
         split_cost = sum(
-            float(s.get("usdcSize", 0)) for s in raw_activity.get("SPLIT", [])
+            to_decimal(s.get("usdcSize", 0)) for s in raw_activity.get("SPLIT", [])
         )
         merge_revenue = sum(
-            float(m.get("usdcSize", 0)) for m in raw_activity.get("MERGE", [])
+            to_decimal(m.get("usdcSize", 0)) for m in raw_activity.get("MERGE", [])
         )
         reward_revenue = sum(
-            float(r.get("usdcSize", 0)) for r in raw_activity.get("REWARD", [])
+            to_decimal(r.get("usdcSize", 0)) for r in raw_activity.get("REWARD", [])
+        )
+        conversion_revenue = sum(
+            to_decimal(c.get("usdcSize", 0)) for c in raw_activity.get("CONVERSION", [])
         )
 
-        total_pnl = (sell_revenue + redeem_revenue + merge_revenue + reward_revenue) - (buy_cost + split_cost)
+        # This is a preview P&L from the current fetch only
+        # The authoritative P&L comes from pnl_calculator after DB save
+        preview_pnl = (sell_revenue + redeem_revenue + merge_revenue + reward_revenue + conversion_revenue) - (buy_cost + split_cost)
 
         return {
-            "trades": all_trades,
+            "trades": trades,  # Only actual trades, no fake redeem trades
             "raw_activity": raw_activity,
             "stats": {
                 "trade_count": len(trades),
-                "redeem_count": len(redeems),
+                "redeem_count": len(raw_activity.get("REDEEM", [])),
                 "split_count": len(raw_activity.get("SPLIT", [])),
                 "merge_count": len(raw_activity.get("MERGE", [])),
                 "reward_count": len(raw_activity.get("REWARD", [])),
+                "conversion_count": len(raw_activity.get("CONVERSION", [])),
             },
             "cash_flow": {
-                "buy_cost": buy_cost,
-                "sell_revenue": sell_revenue,
-                "redeem_revenue": redeem_revenue,
-                "split_cost": split_cost,
-                "merge_revenue": merge_revenue,
-                "reward_revenue": reward_revenue,
-                "total_pnl": total_pnl,
+                # All values as float for JSON serialization, but calculated with Decimal
+                "buy_cost": float(buy_cost),
+                "sell_revenue": float(sell_revenue),
+                "redeem_revenue": float(redeem_revenue),
+                "split_cost": float(split_cost),
+                "merge_revenue": float(merge_revenue),
+                "reward_revenue": float(reward_revenue),
+                "conversion_revenue": float(conversion_revenue),
+                "preview_pnl": float(preview_pnl),  # Preview only
                 # Token volumes for points-based slippage
-                "buy_volume_tokens": buy_volume_tokens,
-                "sell_volume_tokens": sell_volume_tokens,
-                # Note: activity API may be incomplete for high-volume wallets
-                # Use fetch_pnl_from_subgraph() for accurate all-time P&L
-                "_note": "Activity API may be incomplete. Use subgraph for accurate P&L.",
+                "buy_volume_tokens": float(buy_volume_tokens),
+                "sell_volume_tokens": float(sell_volume_tokens),
+                "_note": "Preview P&L from this fetch. Authoritative P&L from pnl_calculator.",
             }
         }
-
-    def get_accurate_pnl(self, wallet_address: str) -> Dict[str, Any]:
-        """
-        Get accurate all-time P&L from the PnL subgraph.
-
-        The activity API has data limitations. The subgraph indexes
-        directly from blockchain and provides authoritative P&L data.
-        """
-        return self._trade_fetcher.fetch_pnl_from_subgraph(wallet_address)
 
     def get_current_positions(self, wallet_address: str) -> List[dict]:
         """Get current open positions with P&L data."""

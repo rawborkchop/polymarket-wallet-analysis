@@ -99,10 +99,11 @@ class Trade(models.Model):
             models.Index(fields=['wallet', 'side']),
         ]
         # Unique constraint to prevent duplicate trades
+        # Includes wallet and market to handle same asset traded in different contexts
         constraints = [
             models.UniqueConstraint(
-                fields=['transaction_hash', 'asset', 'size', 'price', 'side'],
-                name='unique_trade'
+                fields=['wallet', 'transaction_hash', 'asset', 'market', 'side'],
+                name='unique_trade_v2'
             )
         ]
 
@@ -149,6 +150,14 @@ class Activity(models.Model):
         indexes = [
             models.Index(fields=['wallet', 'activity_type']),
             models.Index(fields=['wallet', 'timestamp']),
+        ]
+        # Unique constraint to prevent duplicate activities (includes wallet
+        # so the same on-chain activity can exist for different tracked wallets)
+        constraints = [
+            models.UniqueConstraint(
+                fields=['wallet', 'transaction_hash', 'activity_type', 'size', 'usdc_size'],
+                name='unique_activity_v2'
+            )
         ]
 
     def __str__(self):

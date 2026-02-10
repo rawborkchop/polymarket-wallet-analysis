@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from decimal import Decimal
+from typing import Optional, Union
 from enum import Enum
 
 
@@ -16,6 +17,18 @@ class ActivityType(Enum):
     MERGE = "MERGE"
 
 
+def to_decimal(value, default: str = "0") -> Decimal:
+    """
+    Safely convert a value to Decimal, avoiding float precision issues.
+
+    Always converts through string representation to preserve precision.
+    """
+    if value is None:
+        return Decimal(default)
+    # Convert through string to avoid float precision issues
+    return Decimal(str(value))
+
+
 @dataclass
 class Trade:
     """Immutable data model representing a Polymarket trade."""
@@ -24,8 +37,8 @@ class Trade:
     side: TradeSide
     asset: str
     condition_id: str
-    size: float
-    price: float
+    size: Decimal
+    price: Decimal
     timestamp: int
     title: str
     slug: str
@@ -45,7 +58,7 @@ class Trade:
         return datetime.fromtimestamp(self.timestamp)
 
     @property
-    def total_value(self) -> float:
+    def total_value(self) -> Decimal:
         """Calculate total value of the trade (size * price)."""
         return self.size * self.price
 
@@ -65,8 +78,8 @@ class Trade:
             side=TradeSide(data.get("side", "BUY")),
             asset=data.get("asset", ""),
             condition_id=data.get("conditionId", ""),
-            size=float(data.get("size", 0)),
-            price=float(data.get("price", 0)),
+            size=to_decimal(data.get("size", 0)),
+            price=to_decimal(data.get("price", 0)),
             timestamp=int(data.get("timestamp", 0)),
             title=data.get("title", ""),
             slug=data.get("slug", ""),
@@ -88,8 +101,8 @@ class Trade:
             "side": self.side.value,
             "asset": self.asset,
             "condition_id": self.condition_id,
-            "size": self.size,
-            "price": self.price,
+            "size": float(self.size),  # Convert to float for JSON serialization
+            "price": float(self.price),
             "timestamp": self.timestamp,
             "datetime": self.datetime.isoformat(),
             "title": self.title,
@@ -97,34 +110,6 @@ class Trade:
             "outcome": self.outcome,
             "outcome_index": self.outcome_index,
             "transaction_hash": self.transaction_hash,
-            "total_value": self.total_value,
+            "total_value": float(self.total_value),
             "event_slug": self.event_slug,
         }
-
-    @classmethod
-    def from_redeem(cls, data: dict) -> "Trade":
-        """
-        Create a Trade from a REDEEM activity.
-
-        REDEEM = selling winning tokens at $1 each.
-        """
-        return cls(
-            proxy_wallet=data.get("proxyWallet", ""),
-            side=TradeSide.SELL,  # REDEEM is like selling at $1
-            asset=data.get("asset", ""),
-            condition_id=data.get("conditionId", ""),
-            size=float(data.get("size", 0)),
-            price=1.0,  # Winning tokens redeem for $1
-            timestamp=int(data.get("timestamp", 0)),
-            title=data.get("title", ""),
-            slug=data.get("slug", ""),
-            outcome=data.get("outcome", ""),
-            outcome_index=int(data.get("outcomeIndex", 0)),
-            transaction_hash=data.get("transactionHash", ""),
-            icon=data.get("icon"),
-            event_slug=data.get("eventSlug"),
-            name=data.get("name"),
-            pseudonym=data.get("pseudonym"),
-            bio=data.get("bio"),
-            profile_image=data.get("profileImage"),
-        )

@@ -9,34 +9,52 @@ from .models import (
 
 class WalletSerializer(serializers.ModelSerializer):
     trades_count = serializers.SerializerMethodField()
+    unique_markets = serializers.SerializerMethodField()
+    realized_pnl = serializers.SerializerMethodField()
 
     class Meta:
         model = Wallet
         fields = [
             'id', 'address', 'name', 'pseudonym',
-            'subgraph_realized_pnl', 'subgraph_total_bought',
-            'subgraph_total_positions', 'first_seen', 'last_updated',
+            'realized_pnl', 'unique_markets',
+            'first_seen', 'last_updated',
             'data_start_date', 'data_end_date', 'trades_count'
         ]
 
     def get_trades_count(self, obj):
         return obj.trades.count()
 
+    def get_unique_markets(self, obj):
+        return obj.trades.values('market').distinct().count()
+
+    def get_realized_pnl(self, obj):
+        """Return stored P&L (calculated on refresh)."""
+        return float(obj.subgraph_realized_pnl or 0)
+
 
 class WalletSummarySerializer(serializers.ModelSerializer):
     """Lightweight wallet serializer for lists."""
     trades_count = serializers.SerializerMethodField()
+    unique_markets = serializers.SerializerMethodField()
+    realized_pnl = serializers.SerializerMethodField()
 
     class Meta:
         model = Wallet
         fields = [
-            'id', 'address', 'name', 'subgraph_realized_pnl',
-            'subgraph_total_positions', 'subgraph_total_bought',
-            'last_updated', 'data_start_date', 'data_end_date', 'trades_count'
+            'id', 'address', 'name', 'realized_pnl',
+            'unique_markets', 'last_updated',
+            'data_start_date', 'data_end_date', 'trades_count'
         ]
 
     def get_trades_count(self, obj):
         return obj.trades.count()
+
+    def get_unique_markets(self, obj):
+        return obj.trades.values('market').distinct().count()
+
+    def get_realized_pnl(self, obj):
+        """Return stored P&L (calculated on refresh)."""
+        return float(obj.subgraph_realized_pnl or 0)
 
 
 class MarketSerializer(serializers.ModelSerializer):
@@ -94,7 +112,7 @@ class AnalysisRunSerializer(serializers.ModelSerializer):
             'total_trades', 'total_buys', 'total_sells',
             'total_volume_usd', 'unique_markets',
             'buy_cost', 'sell_revenue', 'redeem_revenue',
-            'cash_flow_pnl', 'subgraph_realized_pnl',
+            'cash_flow_pnl',
             'win_rate_percent', 'profit_factor', 'max_drawdown_usd',
             'copy_scenarios'
         ]
@@ -108,7 +126,7 @@ class AnalysisRunSummarySerializer(serializers.ModelSerializer):
         model = AnalysisRun
         fields = [
             'id', 'wallet_address', 'timestamp', 'total_trades',
-            'total_volume_usd', 'subgraph_realized_pnl'
+            'total_volume_usd', 'cash_flow_pnl'
         ]
 
 

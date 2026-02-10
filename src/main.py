@@ -118,16 +118,8 @@ class WalletAnalyzer:
         print("[3/6] Performing trading analytics...")
         analytics = self._analytics_service.analyze(trades)
 
-        # Get cash flow from activity (may be incomplete for high-volume wallets)
+        # Get cash flow from activity
         cash_flow = activity_result.get("cash_flow", {})
-
-        # Get accurate all-time P&L from subgraph (authoritative source)
-        print("      Fetching accurate P&L from subgraph...")
-        subgraph_pnl = self._trade_service.get_accurate_pnl(wallet_address)
-        cash_flow["subgraph_realized_pnl"] = subgraph_pnl.get("realized_pnl", 0)
-        cash_flow["subgraph_total_bought"] = subgraph_pnl.get("total_bought", 0)
-        cash_flow["subgraph_total_positions"] = subgraph_pnl.get("total_positions", 0)
-
         analytics["cash_flow_pnl"] = cash_flow
 
         analytics_files = self._csv_exporter.export_analysis(analytics, output_dir / "analytics")
@@ -204,16 +196,12 @@ class WalletAnalyzer:
         print("ANALYSIS SUMMARY")
         print(f"{'='*60}\n")
 
-        # P&L from subgraph (accurate, matches Polymarket web)
+        # Cash flow P&L calculated from trades and activities
         cash_flow = analytics.get("cash_flow_pnl", {})
         if cash_flow:
-            subgraph_pnl = cash_flow.get('subgraph_realized_pnl', 0)
-            print("ALL-TIME P&L (from Polymarket subgraph - matches web):")
-            print(f"  Realized P&L:        ${subgraph_pnl:,.2f}")
-            print(f"  Total Positions:     {cash_flow.get('subgraph_total_positions', 0)}")
-            print()
-
-            print("PERIOD ACTIVITY (from API - may be incomplete for high-volume wallets):")
+            total_pnl = cash_flow.get('total_pnl', 0)
+            print("PERIOD P&L (calculated from trades):")
+            print(f"  Total P&L:           ${total_pnl:,.2f}")
             print(f"  Buy Cost:            ${cash_flow.get('buy_cost', 0):,.2f}")
             print(f"  Sell Revenue:        ${cash_flow.get('sell_revenue', 0):,.2f}")
             print(f"  Redeem Revenue:      ${cash_flow.get('redeem_revenue', 0):,.2f}")

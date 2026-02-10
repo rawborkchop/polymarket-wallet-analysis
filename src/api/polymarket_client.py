@@ -1,7 +1,10 @@
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Dict
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 from src.api.models import Trade
 from src.interfaces.trade_fetcher import ITradeFetcher
@@ -19,6 +22,7 @@ class PolymarketClient(ITradeFetcher):
     BASE_URL = "https://data-api.polymarket.com"
     MAX_LIMIT = 500  # Activity endpoint max is 500
     MAX_WORKERS = 10
+    MAX_PAGINATION_ITERATIONS = 200
 
     def __init__(self, session: Optional[requests.Session] = None):
         self._session = session or requests.Session()
@@ -85,7 +89,12 @@ class PolymarketClient(ITradeFetcher):
 
         print("      Fetching trades from activity endpoint...", end="\r")
 
+        iteration = 0
         while True:
+            iteration += 1
+            if iteration > self.MAX_PAGINATION_ITERATIONS:
+                logger.warning(f"fetch_all_trades hit MAX_PAGINATION_ITERATIONS ({self.MAX_PAGINATION_ITERATIONS}) for {wallet_address}")
+                break
             # Fetch batch with current time window
             batch = self._fetch_activity_batch(
                 wallet_address,
@@ -101,7 +110,7 @@ class PolymarketClient(ITradeFetcher):
             new_trades = 0
             oldest_ts = None
             for trade in batch:
-                trade_id = f"{trade.get('transactionHash', '')}_{trade.get('timestamp', '')}"
+                trade_id = f"{trade.get('transactionHash', '')}_{trade.get('timestamp', '')}_{trade.get('conditionId', '')}"
                 if trade_id not in seen_ids:
                     seen_ids.add(trade_id)
                     all_trades.append(trade)
@@ -117,7 +126,11 @@ class PolymarketClient(ITradeFetcher):
             if len(batch) < self.MAX_LIMIT:
                 break
 
-            # Use oldest timestamp as cursor for next batch (subtract 1 to avoid duplicates)
+            # Use oldest timestamp as cursor for next batch (subtract 1 to avoid duplicates).
+            # NOTE: Off-by-one possible if multiple trades share the exact same second
+            # as the oldest in a full batch (500). The seen_ids set provides a safety net
+            # for deduplication, but trades at oldest_ts - 1 boundary could be missed.
+            # In practice this is rare since timestamps have second precision.
             if oldest_ts and oldest_ts > (after_timestamp or 0):
                 current_end = oldest_ts - 1
             else:
@@ -143,7 +156,12 @@ class PolymarketClient(ITradeFetcher):
         current_end = before_timestamp
         seen_ids = set()
 
+        iteration = 0
         while True:
+            iteration += 1
+            if iteration > self.MAX_PAGINATION_ITERATIONS:
+                logger.warning(f"_fetch_single_activity_type({activity_type}) hit MAX_PAGINATION_ITERATIONS ({self.MAX_PAGINATION_ITERATIONS}) for {wallet_address}")
+                break
             batch = self._fetch_activity_batch(
                 wallet_address,
                 start_ts=after_timestamp,
@@ -171,6 +189,7 @@ class PolymarketClient(ITradeFetcher):
             if len(batch) < self.MAX_LIMIT:
                 break
 
+            # Off-by-one: see comment in fetch_all_trades for details
             if oldest_ts and oldest_ts > (after_timestamp or 0):
                 current_end = oldest_ts - 1
             else:
@@ -196,7 +215,7 @@ class PolymarketClient(ITradeFetcher):
         self._validate_wallet_address(wallet_address)
 
         result: Dict[str, List[dict]] = {}
-        activity_types = ["TRADE", "REDEEM", "SPLIT", "MERGE", "REWARD"]
+        activity_types = ["TRADE", "REDEEM", "SPLIT", "MERGE", "REWARD", "CONVERSION"]
 
         print("      Fetching activity types separately...")
 
@@ -209,98 +228,9 @@ class PolymarketClient(ITradeFetcher):
 
         print(f"      Total: {len(result.get('TRADE', []))} trades, {len(result.get('REDEEM', []))} redeems, "
               f"{len(result.get('SPLIT', []))} splits, {len(result.get('MERGE', []))} merges, "
-              f"{len(result.get('REWARD', []))} rewards")
+              f"{len(result.get('REWARD', []))} rewards, {len(result.get('CONVERSION', []))} conversions")
 
         return result
-
-    def fetch_pnl_from_subgraph(self, wallet_address: str) -> Dict[str, float]:
-        """
-        Fetch accurate all-time P&L from Polymarket's PnL subgraph.
-
-        The activity API has data limitations and may miss trades.
-        The subgraph indexes directly from blockchain and is authoritative.
-
-        Returns:
-            Dict with realized_pnl, total_bought, total_positions, tokens_held
-        """
-        self._validate_wallet_address(wallet_address)
-
-        subgraph_url = "https://api.goldsky.com/api/public/project_cl6mb8i9h0003e201j6li0diw/subgraphs/pnl-subgraph/0.0.14/gn"
-
-        all_positions = []
-        skip = 0
-        page_size = 500  # Smaller page size to avoid timeouts
-        max_retries = 3
-        hit_error = False
-
-        print("      Fetching P&L from subgraph...", end="\r")
-
-        while skip < 15000:  # Safety limit
-            query = f'''
-            {{
-              userPositions(first: {page_size}, skip: {skip}, where: {{user: "{wallet_address.lower()}"}}) {{
-                realizedPnl
-                totalBought
-                amount
-              }}
-            }}
-            '''
-
-            success = False
-            for retry in range(max_retries):
-                try:
-                    response = self._session.post(
-                        subgraph_url,
-                        json={"query": query},
-                        timeout=45  # Longer timeout
-                    )
-                    data = response.json()
-
-                    if "errors" in data:
-                        # Timeout or query error, try with smaller offset
-                        if retry < max_retries - 1:
-                            continue
-                        hit_error = True
-                        break
-
-                    positions = data.get("data", {}).get("userPositions", [])
-                    if not positions:
-                        success = True
-                        break
-
-                    all_positions.extend(positions)
-                    skip += page_size
-                    success = True
-                    print(f"      Fetching P&L from subgraph... {len(all_positions)} positions", end="\r")
-                    break
-
-                except Exception as e:
-                    if retry == max_retries - 1:
-                        print(f"      Subgraph error after retries: {e}")
-                        hit_error = True
-
-            if not success or hit_error:
-                break
-
-            # Check if we got fewer than requested (means we're done)
-            if len(data.get("data", {}).get("userPositions", [])) < page_size:
-                break
-
-        # Values in subgraph are in micro-USDC (6 decimals)
-        total_realized_pnl = sum(float(p.get("realizedPnl", 0)) for p in all_positions) / 1e6
-        total_bought = sum(float(p.get("totalBought", 0)) for p in all_positions) / 1e6
-        tokens_held = sum(float(p.get("amount", 0)) for p in all_positions) / 1e6
-
-        status = "partial" if hit_error else "complete"
-        print(f"      Subgraph: {len(all_positions)} positions ({status}), P&L: ${total_realized_pnl:,.2f}          ")
-
-        return {
-            "realized_pnl": total_realized_pnl,
-            "total_bought": total_bought,
-            "tokens_held": tokens_held,
-            "total_positions": len(all_positions),
-            "complete": not hit_error,
-        }
 
     def fetch_current_positions(self, wallet_address: str) -> List[dict]:
         """

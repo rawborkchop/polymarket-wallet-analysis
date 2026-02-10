@@ -87,25 +87,21 @@ class CopyTradingAnalyzer(IAnalyzer):
             resolutions: Market resolution data (from GammaClient).
             cash_flow: Cash flow data for P&L calculation.
                        Contains buy_cost, sell_revenue, redeem_revenue,
-                       split_cost, merge_revenue, and subgraph_realized_pnl.
+                       split_cost, merge_revenue, and total_pnl.
 
         Slippage only affects BUY and SELL trades:
         - For BUY: You buy at a higher price (original_price * (1 + slippage))
         - For SELL: You sell at a lower price (original_price * (1 - slippage))
         - REDEEM, SPLIT, MERGE: No slippage (contract-level operations)
 
-        Note: Original trader P&L uses subgraph data when available (most accurate).
-        Copy P&L estimates slippage impact on the period's activity.
+        Original trader P&L is calculated from trades/activities in the period.
+        Copy P&L estimates slippage impact on that period's activity.
         """
         if not trades:
             return {"scenarios": [], "recommendation": None}
 
         self._resolutions = resolutions or {}
         self._cash_flow = cash_flow or {}
-
-        # Use subgraph P&L as the authoritative original trader P&L
-        # This is the accurate all-time realized P&L
-        self._original_pnl_subgraph = cash_flow.get("subgraph_realized_pnl") if cash_flow else None
 
         scenarios = []
         for slippage in self._slippages:
@@ -162,19 +158,11 @@ class CopyTradingAnalyzer(IAnalyzer):
         period_original_pnl = (orig_sell_revenue + redeem_revenue + merge_revenue + reward_revenue) - (orig_buy_cost + split_cost)
         period_copy_pnl = (copy_sell_revenue + redeem_revenue + merge_revenue + reward_revenue) - (copy_buy_cost + split_cost)
 
-        # Slippage impact is the difference between copy and original for this period
-        slippage_impact = period_copy_pnl - period_original_pnl
+        # Use period P&L calculated from trades and activities
+        original_pnl = period_original_pnl
+        copy_pnl = period_copy_pnl
 
-        # Use subgraph P&L as the authoritative original P&L (most accurate)
-        # The copy P&L is estimated as: original_pnl + slippage_impact
-        if self._original_pnl_subgraph is not None:
-            original_pnl = self._original_pnl_subgraph
-            copy_pnl = original_pnl + slippage_impact
-        else:
-            original_pnl = period_original_pnl
-            copy_pnl = period_copy_pnl
-
-        total_volume = sum(t.total_value for t in trades)
+        total_volume = float(sum(t.total_value for t in trades))
         pnl_diff = copy_pnl - original_pnl
 
         return CopyTradingScenario(
@@ -211,21 +199,24 @@ class CopyTradingAnalyzer(IAnalyzer):
                     "copy_sells": [],
                 }
 
+            trade_price = float(trade.price)
+            trade_size = float(trade.size)
+
             if trade.is_buy:
-                copy_price = min(trade.price * (1 + slippage_factor), 0.99)
+                copy_price = min(trade_price * (1 + slippage_factor), 0.99)
                 market_positions[key]["original_buys"].append(
-                    {"size": trade.size, "price": trade.price}
+                    {"size": trade_size, "price": trade_price}
                 )
                 market_positions[key]["copy_buys"].append(
-                    {"size": trade.size, "price": copy_price}
+                    {"size": trade_size, "price": copy_price}
                 )
             else:
-                copy_price = max(trade.price * (1 - slippage_factor), 0.01)
+                copy_price = max(trade_price * (1 - slippage_factor), 0.01)
                 market_positions[key]["original_sells"].append(
-                    {"size": trade.size, "price": trade.price}
+                    {"size": trade_size, "price": trade_price}
                 )
                 market_positions[key]["copy_sells"].append(
-                    {"size": trade.size, "price": copy_price}
+                    {"size": trade_size, "price": copy_price}
                 )
 
             results.append(
@@ -294,7 +285,7 @@ class CopyTradingAnalyzer(IAnalyzer):
                     original_pnl += remaining_size * (0.0 - orig_avg_buy)
                     copy_pnl += remaining_size * (0.0 - copy_avg_buy)
 
-        total_volume = sum(t.total_value for t in trades)
+        total_volume = float(sum(t.total_value for t in trades))
         pnl_diff = copy_pnl - original_pnl
 
         return CopyTradingScenario(

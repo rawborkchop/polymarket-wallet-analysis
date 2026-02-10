@@ -7,8 +7,7 @@ Django server to remain responsive while fetching wallet data.
 
 from celery import shared_task
 from celery.utils.log import get_task_logger
-from datetime import datetime, timedelta
-from decimal import Decimal
+from datetime import datetime, time, timedelta
 
 logger = get_task_logger(__name__)
 
@@ -58,6 +57,7 @@ def fetch_wallet_data(self, wallet_id: int, start_date: str = None, end_date: st
         now = datetime.now()
         if end_date:
             end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+            end_dt = datetime.combine(end_dt.date(), time.max)
             before_timestamp = int(end_dt.timestamp())
             end_date_obj = end_dt.date()
         else:
@@ -100,32 +100,15 @@ def fetch_wallet_data(self, wallet_id: int, start_date: str = None, end_date: st
             db_service.save_trades(wallet, trades)
             db_service.save_activities(wallet, raw_activity)
 
-        # Stage 3: Fetch P&L from subgraph
-        self.update_state(state='PROGRESS', meta={
-            'wallet_id': wallet_id,
-            'address': address,
-            'stage': 'fetching_pnl',
-            'progress': 60
-        })
-
-        subgraph_pnl = trade_service.get_accurate_pnl(address)
-        cash_flow["subgraph_realized_pnl"] = subgraph_pnl.get("realized_pnl", 0)
-        cash_flow["subgraph_total_bought"] = subgraph_pnl.get("total_bought", 0)
-        cash_flow["subgraph_total_positions"] = subgraph_pnl.get("total_positions", 0)
-
-        # Stage 4: Update wallet
+        # Stage 3: Update wallet date range
         self.update_state(state='PROGRESS', meta={
             'wallet_id': wallet_id,
             'address': address,
             'stage': 'updating_wallet',
-            'progress': 80
+            'progress': 70
         })
 
-        wallet.subgraph_realized_pnl = Decimal(str(subgraph_pnl.get("realized_pnl", 0)))
-        wallet.subgraph_total_bought = Decimal(str(subgraph_pnl.get("total_bought", 0)))
-        wallet.subgraph_total_positions = subgraph_pnl.get("total_positions", 0)
-
-        # Update date range
+        # Update date range (expand, don't replace)
         if wallet.data_start_date is None or start_date_obj < wallet.data_start_date:
             wallet.data_start_date = start_date_obj
         if wallet.data_end_date is None or end_date_obj > wallet.data_end_date:
@@ -133,7 +116,15 @@ def fetch_wallet_data(self, wallet_id: int, start_date: str = None, end_date: st
 
         wallet.save()
 
-        # Stage 5: Run analytics
+        # Calculate P&L using the single source of truth (pnl_calculator)
+        # This is done AFTER saving trades so pnl_calculator has all data
+        from wallet_analysis.pnl_calculator import calculate_wallet_pnl
+        pnl_result = calculate_wallet_pnl(wallet)
+        wallet.subgraph_realized_pnl = pnl_result['total_realized_pnl']
+        wallet.subgraph_total_bought = pnl_result['totals'].get('total_buys', 0) + pnl_result['totals'].get('total_splits', 0)
+        wallet.save(update_fields=['subgraph_realized_pnl', 'subgraph_total_bought'])
+
+        # Stage 4: Run analytics
         self.update_state(state='PROGRESS', meta={
             'wallet_id': wallet_id,
             'address': address,
@@ -165,7 +156,7 @@ def fetch_wallet_data(self, wallet_id: int, start_date: str = None, end_date: st
             'wallet_id': wallet_id,
             'address': address,
             'trades_count': len(trades),
-            'pnl': float(wallet.subgraph_realized_pnl or 0),
+            'realized_pnl': float(wallet.subgraph_realized_pnl or 0),  # From pnl_calculator
         }
 
     except Exception as e:

@@ -1,7 +1,20 @@
-requests>=2.31.0
-pandas>=2.0.0
-dataclasses-json>=0.6.0
-python-dateutil>=2.8.2
-py-clob-client>=0.34.0
+# Django and REST
 Django>=5.0.0
 djangorestframework>=3.14.0
+django-cors-headers>=4.3.0
+
+# Celery (background tasks)
+celery>=5.3.0
+django-celery-results>=2.5.0
+pywin32>=311
+
+# HTTP and API
+requests>=2.31.0
+py-clob-client>=0.34.0
+
+# Data processing
+pandas>=2.0.0
+python-dateutil>=2.8.2
+
+# Serialization
+dataclasses-json>=0.6.0

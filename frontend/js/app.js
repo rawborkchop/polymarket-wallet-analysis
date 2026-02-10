@@ -54,6 +54,10 @@ createApp({
         const showDeleteModal = ref(false);
         const walletToDelete = ref(null);
 
+        // Wallet name editing
+        const isEditingName = ref(false);
+        const editedWalletName = ref('');
+
         // Charts
         const dashboardVolumeChart = ref(null);
         const pnlChart = ref(null);
@@ -198,6 +202,44 @@ createApp({
             selectWallet(wallet);
         }
 
+        // Task polling
+        const activeTasks = reactive({}); // { walletId: { taskId, stage, progress } }
+
+        async function pollTaskStatus(taskId, walletId, onProgress, onComplete, onError) {
+            const maxAttempts = 120; // 2 minutes max
+            let attempts = 0;
+
+            const poll = async () => {
+                if (attempts++ >= maxAttempts) {
+                    onError('Task timeout - check server logs');
+                    return;
+                }
+
+                try {
+                    const status = await api.getTaskStatus(taskId);
+
+                    if (status.status === 'PROGRESS') {
+                        onProgress(status.progress || {});
+                        setTimeout(poll, 1000);
+                    } else if (status.status === 'SUCCESS') {
+                        onComplete(status.result || {});
+                    } else if (status.status === 'FAILURE') {
+                        onError(status.error || 'Task failed');
+                    } else if (status.status === 'PENDING' || status.status === 'STARTED') {
+                        onProgress({ stage: 'starting', progress: 5 });
+                        setTimeout(poll, 1000);
+                    } else {
+                        setTimeout(poll, 1000);
+                    }
+                } catch (e) {
+                    console.error('Poll error:', e);
+                    setTimeout(poll, 2000);
+                }
+            };
+
+            poll();
+        }
+
         // Wallet Management
         async function addWallet() {
             if (!newWalletAddress.value || isAddingWallet.value) return;
@@ -205,11 +247,47 @@ createApp({
             addWalletError.value = '';
             try {
                 const result = await api.addWallet(newWalletAddress.value, newWalletName.value);
-                showToast(result.message || 'Wallet added', 'success');
                 showAddWalletModal.value = false;
                 newWalletAddress.value = '';
                 newWalletName.value = '';
-                await fetchWallets();
+
+                const walletId = result.wallet_id;
+                const taskId = result.task_id;
+
+                if (taskId) {
+                    showToast('Fetching wallet data...', 'info');
+                    activeTasks[walletId] = { taskId, stage: 'starting', progress: 0 };
+                    await fetchWallets();
+
+                    pollTaskStatus(
+                        taskId,
+                        walletId,
+                        (progress) => {
+                            activeTasks[walletId] = { taskId, ...progress };
+                            const stage = progress.stage || 'processing';
+                            const pct = progress.progress || 0;
+                            // Update toast periodically for significant progress
+                            if (pct % 25 === 0 || stage === 'saving') {
+                                showToast(`${stage}: ${pct}%`, 'info');
+                            }
+                        },
+                        async (result) => {
+                            delete activeTasks[walletId];
+                            await fetchWallets();
+                            const msg = result.trades_count !== undefined
+                                ? `Loaded ${result.trades_count} trades, P&L: $${(result.pnl || 0).toFixed(2)}`
+                                : 'Wallet data loaded!';
+                            showToast(msg, 'success');
+                        },
+                        (error) => {
+                            delete activeTasks[walletId];
+                            showToast(`Error: ${error}`, 'error');
+                        }
+                    );
+                } else {
+                    showToast(result.message || 'Wallet added', 'success');
+                    await fetchWallets();
+                }
             } catch (e) {
                 addWalletError.value = e.message || 'Failed to add wallet';
             } finally {
@@ -218,14 +296,50 @@ createApp({
         }
 
         async function refreshWalletData(wallet) {
+            if (activeTasks[wallet.id]) {
+                showToast('Task already in progress', 'warning');
+                return;
+            }
+
             showToast('Refreshing wallet data...', 'info');
             try {
-                await api.refreshWallet(wallet.id);
-                showToast('Refresh started in background', 'success');
-                setTimeout(() => fetchWallets(), 3000);
+                const result = await api.refreshWallet(wallet.id);
+                const taskId = result.task_id;
+
+                if (taskId) {
+                    activeTasks[wallet.id] = { taskId, stage: 'starting', progress: 0 };
+
+                    pollTaskStatus(
+                        taskId,
+                        wallet.id,
+                        (progress) => {
+                            activeTasks[wallet.id] = { taskId, ...progress };
+                        },
+                        async (result) => {
+                            delete activeTasks[wallet.id];
+                            await fetchWallets();
+                            showToast(`Refresh complete: ${result.trades_count || 0} trades`, 'success');
+                            // Auto-refresh the selected wallet view
+                            if (selectedWallet.value?.id === wallet.id) {
+                                const updated = wallets.value.find(w => w.id === wallet.id);
+                                if (updated) await selectWallet(updated, true);
+                            }
+                        },
+                        (error) => {
+                            delete activeTasks[wallet.id];
+                            showToast(`Refresh failed: ${error}`, 'error');
+                        }
+                    );
+                } else {
+                    setTimeout(() => fetchWallets(), 3000);
+                }
             } catch (e) {
                 showToast('Refresh failed', 'error');
             }
+        }
+
+        function getTaskProgress(walletId) {
+            return activeTasks[walletId] || null;
         }
 
         async function extendRange(wallet, direction) {
@@ -312,6 +426,38 @@ createApp({
                 await fetchWallets();
             } catch (e) {
                 showToast('Delete failed', 'error');
+            }
+        }
+
+        // Wallet name editing
+        function startEditingName() {
+            if (!selectedWallet.value) return;
+            editedWalletName.value = selectedWallet.value.name || '';
+            isEditingName.value = true;
+        }
+
+        function cancelEditingName() {
+            isEditingName.value = false;
+            editedWalletName.value = '';
+        }
+
+        async function saveWalletName() {
+            if (!selectedWallet.value) return;
+            try {
+                const result = await api.updateWallet(selectedWallet.value.id, { name: editedWalletName.value });
+                selectedWallet.value.name = result.name;
+                if (walletStats.value) {
+                    walletStats.value.wallet.name = result.name;
+                }
+                // Update in the wallets list too
+                const idx = wallets.value.findIndex(w => w.id === selectedWallet.value.id);
+                if (idx >= 0) {
+                    wallets.value[idx].name = result.name;
+                }
+                isEditingName.value = false;
+                showToast('Name updated', 'success');
+            } catch (e) {
+                showToast('Failed to update name', 'error');
             }
         }
 
@@ -484,7 +630,9 @@ createApp({
             trades, filteredTrades, paginatedTrades, selectedTradeWallet, tradeFilterSide, tradeSearch, tradePage, totalTradePages,
             showAddWalletModal, newWalletAddress, newWalletName, isAddingWallet, addWalletError,
             showDeleteModal, walletToDelete,
+            isEditingName, editedWalletName, startEditingName, cancelEditingName, saveWalletName,
             isExtendingRange, extendDays, chartStartDate, chartEndDate,
+            activeTasks, getTaskProgress,
             dashboardVolumeChart, pnlChart, volumeChart, buySellChart, marketPnlChart,
             toasts,
             refreshData, selectWallet, goToWallet, addWallet, refreshWalletData, extendRange, getTimelineData,

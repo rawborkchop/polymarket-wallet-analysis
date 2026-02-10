@@ -40,6 +40,7 @@ INSTALLED_APPS = [
     # Third party
     'rest_framework',
     'corsheaders',
+    'django_celery_results',
     # Local apps
     'wallet_analysis',
 ]
@@ -158,8 +159,21 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
 # Celery Configuration
-CELERY_BROKER_URL = 'redis://localhost:6379/0'
-CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
+# Using filesystem broker for development (no Redis needed)
+# For production, use Redis: CELERY_BROKER_URL = 'redis://localhost:6379/0'
+import os
+_celery_data_dir = BASE_DIR / 'celery_data'
+os.makedirs(_celery_data_dir / 'out', exist_ok=True)
+os.makedirs(_celery_data_dir / 'processed', exist_ok=True)
+
+CELERY_BROKER_URL = f'filesystem://'
+CELERY_BROKER_TRANSPORT_OPTIONS = {
+    'data_folder_in': str(_celery_data_dir / 'out'),
+    'data_folder_out': str(_celery_data_dir / 'out'),
+    'data_folder_processed': str(_celery_data_dir / 'processed'),
+}
+CELERY_RESULT_BACKEND = 'django-db'
+CELERY_CACHE_BACKEND = 'django-cache'
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'

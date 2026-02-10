@@ -126,8 +126,8 @@
             </div>
             <div x-show="analysisResult" x-cloak class="mt-4 p-4 bg-green-50 border border-green-200 rounded-lg">
                 <p class="text-green-800">
-                    Analysis complete! Wallet: <span x-text="analysisResult?.wallet_address"></span>,
-                    P&L: <span x-text="formatCurrency(analysisResult?.subgraph_pnl || 0)"></span>
+                    Analysis complete! Wallet: <span x-text="analysisResult?.address"></span>,
+                    Trades: <span x-text="analysisResult?.trades_count || 0"></span>
                 </p>
             </div>
             <div x-show="analysisError" x-cloak class="mt-4 p-4 bg-red-50 border border-red-200 rounded-lg">
@@ -152,8 +152,8 @@
                             <div class="text-right">
                                 <p
                                     class="font-bold"
-                                    :class="parseFloat(wallet.subgraph_realized_pnl) >= 0 ? 'text-green-600' : 'text-red-600'"
-                                    x-text="formatCurrency(wallet.subgraph_realized_pnl || 0)"
+                                    :class="parseFloat(wallet.realized_pnl) >= 0 ? 'text-green-600' : 'text-red-600'"
+                                    x-text="formatCurrency(wallet.realized_pnl || 0)"
                                 ></p>
                             </div>
                         </div>
@@ -181,8 +181,8 @@
                                 <p class="font-medium text-gray-800" x-text="analysis.total_trades + ' trades'"></p>
                                 <p
                                     class="text-sm font-bold"
-                                    :class="parseFloat(analysis.subgraph_realized_pnl) >= 0 ? 'text-green-600' : 'text-red-600'"
-                                    x-text="formatCurrency(analysis.subgraph_realized_pnl || 0)"
+                                    :class="parseFloat(analysis.cash_flow_pnl) >= 0 ? 'text-green-600' : 'text-red-600'"
+                                    x-text="formatCurrency(analysis.cash_flow_pnl || 0)"
                                 ></p>
                             </div>
                         </div>
@@ -215,8 +215,8 @@
                         <p class="text-sm text-gray-500">Total P&L</p>
                         <p
                             class="text-xl font-bold"
-                            :class="parseFloat(selectedWallet?.subgraph_realized_pnl) >= 0 ? 'text-green-600' : 'text-red-600'"
-                            x-text="formatCurrency(selectedWallet?.subgraph_realized_pnl || 0)"
+                            :class="parseFloat(selectedWallet?.realized_pnl) >= 0 ? 'text-green-600' : 'text-red-600'"
+                            x-text="formatCurrency(selectedWallet?.realized_pnl || 0)"
                         ></p>
                     </div>
                     <div class="bg-gray-50 rounded-lg p-4">
@@ -275,7 +275,7 @@
     <footer class="bg-gray-800 text-gray-400 py-6 mt-12">
         <div class="container mx-auto px-6 text-center">
             <p>Polymarket Wallet Analysis Dashboard</p>
-            <p class="text-sm mt-1">Data from Polymarket API and PnL Subgraph</p>
+            <p class="text-sm mt-1">Data from Polymarket Activity API</p>
         </div>
     </footer>
 

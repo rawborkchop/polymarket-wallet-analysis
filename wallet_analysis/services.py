@@ -7,11 +7,14 @@ Handles saving and querying data using Django ORM.
 import os
 import django
 import math
+import logging
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import List, Dict, Any, Optional
 
 from django.utils import timezone
+
+logger = logging.getLogger(__name__)
 
 # Setup Django before importing models
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'polymarket_project.settings')
@@ -116,39 +119,62 @@ class DatabaseService:
                     size=Decimal(str(trade_dto.size)),
                     total_value=Decimal(str(trade_dto.total_value)),
                 ))
-            except Exception:
+            except Exception as e:
+                logger.warning(
+                    f"Skipped invalid trade for wallet {wallet.address}: "
+                    f"tx={getattr(trade_dto, 'transaction_hash', 'unknown')}, error={e}"
+                )
                 continue
 
             # Commit batch
             if len(batch) >= batch_size:
                 try:
+                    # Count trades before to detect actual inserts vs duplicates
+                    before_count = Trade.objects.filter(wallet=wallet).count()
                     with transaction.atomic():
                         Trade.objects.bulk_create(batch, ignore_conflicts=True)
-                    inserted += len(batch)
+                    after_count = Trade.objects.filter(wallet=wallet).count()
+                    actually_inserted = after_count - before_count
+                    inserted += actually_inserted
+                    if actually_inserted < len(batch):
+                        logger.warning(
+                            f"Duplicates for {wallet.address}: {len(batch) - actually_inserted}/{len(batch)} ignored"
+                        )
                 except Exception as e:
+                    logger.warning(f"Bulk insert failed for {len(batch)} trades, trying individual: {e}")
                     # On conflict, fall back to individual inserts
                     for trade in batch:
                         try:
                             trade.save()
                             inserted += 1
-                        except Exception:
-                            pass
+                        except Exception as individual_error:
+                            logger.debug(f"Individual trade insert failed: {individual_error}")
                 batch = []
 
         # Final batch
         if batch:
             try:
+                # Count trades before to detect actual inserts vs duplicates
+                before_count = Trade.objects.filter(wallet=wallet).count()
                 with transaction.atomic():
                     Trade.objects.bulk_create(batch, ignore_conflicts=True)
-                inserted += len(batch)
-            except Exception:
+                after_count = Trade.objects.filter(wallet=wallet).count()
+                actually_inserted = after_count - before_count
+                inserted += actually_inserted
+                if actually_inserted < len(batch):
+                    logger.warning(
+                        f"Duplicates for {wallet.address}: {len(batch) - actually_inserted}/{len(batch)} ignored"
+                    )
+            except Exception as e:
+                logger.warning(f"Final bulk insert failed for {len(batch)} trades: {e}")
                 for trade in batch:
                     try:
                         trade.save()
                         inserted += 1
-                    except Exception:
-                        pass
+                    except Exception as individual_error:
+                        logger.debug(f"Individual trade insert failed: {individual_error}")
 
+        logger.info(f"Saved {inserted} trades for wallet {wallet.address} (from {len(trades)} provided)")
         return inserted
 
     def save_activities(
@@ -203,27 +229,40 @@ class DatabaseService:
                     # Commit batch
                     if len(batch) >= batch_size:
                         try:
+                            before_count = Activity.objects.filter(wallet=wallet, activity_type=activity_type).count()
                             with transaction.atomic():
                                 Activity.objects.bulk_create(batch, ignore_conflicts=True)
-                            inserted += len(batch)
-                        except Exception:
-                            pass
+                            after_count = Activity.objects.filter(wallet=wallet, activity_type=activity_type).count()
+                            inserted += (after_count - before_count)
+                        except Exception as e:
+                            logger.warning(f"Bulk insert failed for {activity_type} activities: {e}")
                         batch = []
 
-                except Exception:
+                except Exception as e:
+                    logger.warning(
+                        f"Skipped invalid {activity_type} activity for wallet {wallet.address}: "
+                        f"tx={item.get('transactionHash', 'unknown')}, error={e}"
+                    )
                     continue
 
             # Final batch
             if batch:
                 try:
+                    before_count = Activity.objects.filter(wallet=wallet, activity_type=activity_type).count()
                     with transaction.atomic():
                         Activity.objects.bulk_create(batch, ignore_conflicts=True)
-                    inserted += len(batch)
-                except Exception:
-                    pass
+                    after_count = Activity.objects.filter(wallet=wallet, activity_type=activity_type).count()
+                    inserted += (after_count - before_count)
+                except Exception as e:
+                    logger.warning(f"Final bulk insert failed for {activity_type} activities: {e}")
 
             counts[activity_type] = inserted
+            if inserted > 0:
+                logger.info(f"Saved {inserted} {activity_type} activities for wallet {wallet.address}")
 
+        total_saved = sum(counts.values())
+        total_provided = sum(len(items) for k, items in activity_data.items() if k != 'TRADE')
+        logger.info(f"Activity save complete for {wallet.address}: {total_saved}/{total_provided} saved")
         return counts
 
     @transaction.atomic
@@ -331,23 +370,14 @@ class DatabaseService:
             split_cost=Decimal(str(cash_flow.get('split_cost', 0))),
             merge_revenue=Decimal(str(cash_flow.get('merge_revenue', 0))),
             reward_revenue=Decimal(str(cash_flow.get('reward_revenue', 0))),
-            cash_flow_pnl=Decimal(str(cash_flow.get('total_pnl', 0))),
-            # Subgraph P&L
-            subgraph_realized_pnl=safe_decimal(cash_flow.get('subgraph_realized_pnl')),
-            subgraph_total_bought=safe_decimal(cash_flow.get('subgraph_total_bought')),
-            subgraph_total_positions=cash_flow.get('subgraph_total_positions'),
+            # preview_pnl is from trade_service (fetch-time estimate)
+            # The authoritative P&L is calculated by pnl_calculator from DB
+            cash_flow_pnl=Decimal(str(cash_flow.get('preview_pnl', cash_flow.get('total_pnl', 0)))),
             # Performance (use safe_decimal to handle infinity/nan)
             win_rate_percent=safe_decimal(performance.get('win_rate_percent')),
             profit_factor=safe_decimal(performance.get('profit_factor')),
             max_drawdown_usd=safe_decimal(performance.get('max_drawdown_usd')),
         )
-
-        # Update wallet with latest P&L
-        if cash_flow.get('subgraph_realized_pnl'):
-            wallet.subgraph_realized_pnl = Decimal(str(cash_flow['subgraph_realized_pnl']))
-            wallet.subgraph_total_bought = Decimal(str(cash_flow.get('subgraph_total_bought', 0)))
-            wallet.subgraph_total_positions = cash_flow.get('subgraph_total_positions')
-            wallet.save()
 
         return analysis_run
 

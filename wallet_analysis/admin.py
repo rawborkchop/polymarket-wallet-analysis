@@ -9,7 +9,7 @@ from .models import (
 
 @admin.register(Wallet)
 class WalletAdmin(admin.ModelAdmin):
-    list_display = ['address', 'name', 'pseudonym', 'subgraph_realized_pnl', 'last_updated']
+    list_display = ['address', 'name', 'pseudonym', 'data_start_date', 'data_end_date', 'last_updated']
     search_fields = ['address', 'name', 'pseudonym']
     list_filter = ['last_updated']
     readonly_fields = ['first_seen', 'last_updated']
@@ -58,7 +58,7 @@ class CurrentPositionAdmin(admin.ModelAdmin):
 class AnalysisRunAdmin(admin.ModelAdmin):
     list_display = [
         'wallet', 'timestamp', 'total_trades', 'total_volume_usd',
-        'subgraph_realized_pnl', 'win_rate_percent'
+        'cash_flow_pnl', 'win_rate_percent'
     ]
     search_fields = ['wallet__address']
     list_filter = ['timestamp']

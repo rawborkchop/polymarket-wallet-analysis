@@ -3,7 +3,7 @@
  * Handles all communication with the Django backend
  */
 
-const API_BASE = 'http://127.0.0.1:8000/api';
+const API_BASE = window.location.origin + '/api';
 
 class ApiService {
     constructor(baseUrl = API_BASE) {
@@ -15,6 +15,7 @@ class ApiService {
         const config = {
             headers: {
                 'Content-Type': 'application/json',
+                'ngrok-skip-browser-warning': 'true',
                 ...options.headers,
             },
             ...options,
@@ -50,11 +51,12 @@ class ApiService {
         return this.request(`/wallets/${id}/`);
     }
 
-    async getWalletStats(id, chartStart = null, chartEnd = null) {
+    async getWalletStats(id, chartStart = null, chartEnd = null, period = '1M') {
         let url = `/wallets/${id}/stats/`;
         const params = new URLSearchParams();
         if (chartStart) params.append('chart_start', chartStart);
         if (chartEnd) params.append('chart_end', chartEnd);
+        if (period) params.append('period', period);
         if (params.toString()) url += '?' + params.toString();
         return this.request(url);
     }

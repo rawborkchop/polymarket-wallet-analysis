@@ -25,7 +25,8 @@ SECRET_KEY = 'django-insecure-==e_^+^4pklw9e5nnqj1jyfc@8c&ab0_i(70^7)w202-4@%$a#
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['*']
+CSRF_TRUSTED_ORIGINS = ['https://*.ngrok-free.app']
 
 
 # Application definition
@@ -90,27 +91,44 @@ WSGI_APPLICATION = 'polymarket_project.wsgi.application'
 
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
+#
+# Set DB_ENGINE=postgresql to use PostgreSQL, otherwise defaults to SQLite.
+# PostgreSQL env vars: DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-        'OPTIONS': {
-            'timeout': 30,  # Wait up to 30 seconds for locks
-        },
+import os
+
+if os.environ.get('DB_ENGINE') == 'postgresql':
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': os.environ.get('DB_NAME', 'polymarket'),
+            'USER': os.environ.get('DB_USER', 'polymarket'),
+            'PASSWORD': os.environ.get('DB_PASSWORD', 'polymarket'),
+            'HOST': os.environ.get('DB_HOST', 'localhost'),
+            'PORT': os.environ.get('DB_PORT', '5432'),
+        }
     }
-}
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+            'OPTIONS': {
+                'timeout': 30,  # Wait up to 30 seconds for locks
+            },
+        }
+    }
 
-# Enable WAL mode for better concurrency
-from django.db.backends.signals import connection_created
+    # Enable WAL mode for better SQLite concurrency
+    from django.db.backends.signals import connection_created
 
-def enable_wal_mode(sender, connection, **kwargs):
-    if connection.vendor == 'sqlite':
-        cursor = connection.cursor()
-        cursor.execute('PRAGMA journal_mode=WAL;')
-        cursor.execute('PRAGMA busy_timeout=30000;')
+    def enable_wal_mode(sender, connection, **kwargs):
+        if connection.vendor == 'sqlite':
+            cursor = connection.cursor()
+            cursor.execute('PRAGMA journal_mode=WAL;')
+            cursor.execute('PRAGMA busy_timeout=30000;')
 
-connection_created.connect(enable_wal_mode)
+    connection_created.connect(enable_wal_mode)
 
 
 # Password validation

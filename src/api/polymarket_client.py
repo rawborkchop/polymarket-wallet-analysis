@@ -1,12 +1,10 @@
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Dict
 
 import requests
 
 logger = logging.getLogger(__name__)
 
-from src.api.models import Trade
 from src.interfaces.trade_fetcher import ITradeFetcher
 
 
@@ -36,15 +34,13 @@ class PolymarketClient(ITradeFetcher):
         wallet_address: str,
         start_ts: Optional[int] = None,
         end_ts: Optional[int] = None,
-        offset: int = 0,
-        activity_types: str = "TRADE",
     ) -> List[dict]:
-        """Fetch a single batch of activity using timestamp filtering."""
+        """Fetch a single batch of activity using timestamp filtering (DESC sort, no type filter)."""
         params = {
             "user": wallet_address,
             "limit": self.MAX_LIMIT,
-            "offset": offset,
-            "type": activity_types,
+            "sortBy": "TIMESTAMP",
+            "sortDirection": "DESC",
         }
         if start_ts:
             params["start"] = start_ts
@@ -57,146 +53,48 @@ class PolymarketClient(ITradeFetcher):
         response.raise_for_status()
         return response.json()
 
-    def fetch_trades(
+    def _fetch_activity_with_window_cursor(
         self,
         wallet_address: str,
-        limit: int = MAX_LIMIT,
-        offset: int = 0,
-        after_timestamp: Optional[int] = None,
-    ) -> List[Trade]:
-        """Fetch trades for a given wallet address."""
-        self._validate_wallet_address(wallet_address)
-        raw = self._fetch_activity_batch(wallet_address, start_ts=after_timestamp, offset=offset)
-        return [Trade.from_api_response(t) for t in raw[:limit]]
-
-    def fetch_all_trades(
-        self,
-        wallet_address: str,
-        after_timestamp: Optional[int] = None,
-        before_timestamp: Optional[int] = None,
-    ) -> List[Trade]:
-        """
-        Fetch all trades for a wallet within a time window.
-
-        Uses /activity endpoint with timestamp-based cursor pagination to bypass
-        the 10,000 offset limit. The endpoint supports start/end timestamp filtering.
-        """
-        self._validate_wallet_address(wallet_address)
-
-        all_trades: List[dict] = []
-        current_end = before_timestamp
-        seen_ids = set()  # Deduplicate by transaction hash + timestamp
-
-        print("      Fetching trades from activity endpoint...", end="\r")
-
-        iteration = 0
-        while True:
-            iteration += 1
-            if iteration > self.MAX_PAGINATION_ITERATIONS:
-                logger.warning(f"fetch_all_trades hit MAX_PAGINATION_ITERATIONS ({self.MAX_PAGINATION_ITERATIONS}) for {wallet_address}")
-                break
-            # Fetch batch with current time window
-            batch = self._fetch_activity_batch(
-                wallet_address,
-                start_ts=after_timestamp,
-                end_ts=current_end,
-                offset=0,
-            )
-
-            if not batch:
-                break
-
-            # Deduplicate and add trades
-            new_trades = 0
-            oldest_ts = None
-            for trade in batch:
-                trade_id = f"{trade.get('transactionHash', '')}_{trade.get('timestamp', '')}_{trade.get('conditionId', '')}"
-                if trade_id not in seen_ids:
-                    seen_ids.add(trade_id)
-                    all_trades.append(trade)
-                    new_trades += 1
-
-                ts = trade.get("timestamp", 0)
-                if oldest_ts is None or ts < oldest_ts:
-                    oldest_ts = ts
-
-            print(f"      Fetched {len(all_trades)} trades (batch: {new_trades} new)...", end="\r")
-
-            # If we got fewer than limit, we've exhausted this window
-            if len(batch) < self.MAX_LIMIT:
-                break
-
-            # Use oldest timestamp as cursor for next batch (subtract 1 to avoid duplicates).
-            # NOTE: Off-by-one possible if multiple trades share the exact same second
-            # as the oldest in a full batch (500). The seen_ids set provides a safety net
-            # for deduplication, but trades at oldest_ts - 1 boundary could be missed.
-            # In practice this is rare since timestamps have second precision.
-            if oldest_ts and oldest_ts > (after_timestamp or 0):
-                current_end = oldest_ts - 1
-            else:
-                break
-
-            # Safety: if no new trades, we might be stuck
-            if new_trades == 0:
-                break
-
-        print(f"      Found {len(all_trades)} trades in time window.          ")
-
-        return [Trade.from_api_response(t) for t in all_trades]
-
-    def _fetch_single_activity_type(
-        self,
-        wallet_address: str,
-        activity_type: str,
         after_timestamp: Optional[int] = None,
         before_timestamp: Optional[int] = None,
     ) -> List[dict]:
-        """Fetch all activities of a single type with proper pagination."""
+        """
+        Fetch all activity using DESC timestamp pagination (backward).
+
+        Sorts DESC and advances end = min_ts - 1 after each full batch,
+        guaranteeing no overlap between pages without dedup.
+        """
         all_items: List[dict] = []
         current_end = before_timestamp
-        seen_ids = set()
 
-        iteration = 0
-        while True:
-            iteration += 1
-            if iteration > self.MAX_PAGINATION_ITERATIONS:
-                logger.warning(f"_fetch_single_activity_type({activity_type}) hit MAX_PAGINATION_ITERATIONS ({self.MAX_PAGINATION_ITERATIONS}) for {wallet_address}")
-                break
+        for iteration in range(1, self.MAX_PAGINATION_ITERATIONS + 1):
             batch = self._fetch_activity_batch(
-                wallet_address,
+                wallet_address=wallet_address,
                 start_ts=after_timestamp,
                 end_ts=current_end,
-                offset=0,
-                activity_types=activity_type,
             )
-
             if not batch:
                 break
 
-            new_count = 0
-            oldest_ts = None
-            for item in batch:
-                item_id = f"{item.get('transactionHash', '')}_{item.get('timestamp', '')}_{item.get('conditionId', '')}"
-                if item_id not in seen_ids:
-                    seen_ids.add(item_id)
-                    all_items.append(item)
-                    new_count += 1
-
-                ts = item.get("timestamp", 0)
-                if oldest_ts is None or ts < oldest_ts:
-                    oldest_ts = ts
+            all_items.extend(batch)
+            print(f"      Fetched {len(all_items)} items...", end="\r")
 
             if len(batch) < self.MAX_LIMIT:
                 break
 
-            # Off-by-one: see comment in fetch_all_trades for details
-            if oldest_ts and oldest_ts > (after_timestamp or 0):
-                current_end = oldest_ts - 1
-            else:
-                break
+            # Advance backward: min timestamp - 1 to avoid duplicates
+            min_ts = min(item.get("timestamp", 0) for item in batch)
+            current_end = min_ts - 1
 
-            if new_count == 0:
+            if after_timestamp is not None and current_end < after_timestamp:
                 break
+        else:
+            logger.warning(
+                "_fetch_activity_with_window_cursor hit MAX_PAGINATION_ITERATIONS (%s) for %s",
+                self.MAX_PAGINATION_ITERATIONS,
+                wallet_address,
+            )
 
         return all_items
 
@@ -207,28 +105,30 @@ class PolymarketClient(ITradeFetcher):
         before_timestamp: Optional[int] = None,
     ) -> Dict[str, List[dict]]:
         """
-        Fetch ALL activity types for a wallet (TRADE, REDEEM, SPLIT, MERGE, REWARD).
+        Fetch ALL activity types for a wallet in a single pass.
 
-        Fetches each type SEPARATELY to ensure complete pagination.
-        Combined fetching causes pagination issues with interleaved timestamps.
+        Uses DESC backward pagination without type filtering.
+        Splits results by type afterward for downstream consumers.
         """
         self._validate_wallet_address(wallet_address)
+        print("      Fetching all activity...")
 
-        result: Dict[str, List[dict]] = {}
-        activity_types = ["TRADE", "REDEEM", "SPLIT", "MERGE", "REWARD", "CONVERSION"]
+        all_items = self._fetch_activity_with_window_cursor(
+            wallet_address, after_timestamp, before_timestamp
+        )
 
-        print("      Fetching activity types separately...")
+        # Split by type
+        result: Dict[str, List[dict]] = {
+            "TRADE": [], "REDEEM": [], "SPLIT": [], "MERGE": [], "REWARD": [], "CONVERSION": [],
+        }
+        for item in all_items:
+            item_type = item.get("type", "")
+            if item_type in result:
+                result[item_type].append(item)
 
-        for act_type in activity_types:
-            items = self._fetch_single_activity_type(
-                wallet_address, act_type, after_timestamp, before_timestamp
-            )
-            result[act_type] = items
-            print(f"      {act_type}: {len(items)} items")
-
-        print(f"      Total: {len(result.get('TRADE', []))} trades, {len(result.get('REDEEM', []))} redeems, "
-              f"{len(result.get('SPLIT', []))} splits, {len(result.get('MERGE', []))} merges, "
-              f"{len(result.get('REWARD', []))} rewards, {len(result.get('CONVERSION', []))} conversions")
+        print(f"      Total: {len(result['TRADE'])} trades, {len(result['REDEEM'])} redeems, "
+              f"{len(result['SPLIT'])} splits, {len(result['MERGE'])} merges, "
+              f"{len(result['REWARD'])} rewards, {len(result['CONVERSION'])} conversions")
 
         return result
 

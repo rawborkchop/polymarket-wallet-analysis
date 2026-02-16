@@ -50,6 +50,7 @@ createApp({
         // Chart date range filtering
         const chartStartDate = ref(null);
         const chartEndDate = ref(null);
+        const selectedPnlPeriod = ref('1M');
 
         const showDeleteModal = ref(false);
         const walletToDelete = ref(null);
@@ -156,7 +157,7 @@ createApp({
 
             try {
                 const [stats, tradesData] = await Promise.all([
-                    api.getWalletStats(wallet.id, chartStartDate.value, chartEndDate.value),
+                    api.getWalletStats(wallet.id, chartStartDate.value, chartEndDate.value, selectedPnlPeriod.value),
                     api.getWalletTrades(wallet.id),
                 ]);
                 walletStats.value = stats;
@@ -173,13 +174,38 @@ createApp({
             chartStartDate.value = startDate;
             chartEndDate.value = endDate;
             try {
-                const stats = await api.getWalletStats(selectedWallet.value.id, startDate, endDate);
+                const stats = await api.getWalletStats(
+                    selectedWallet.value.id,
+                    startDate,
+                    endDate,
+                    selectedPnlPeriod.value
+                );
                 walletStats.value = stats;
                 await nextTick();
                 initWalletCharts();
                 showToast(`Showing ${startDate || 'start'} to ${endDate || 'end'}`, 'info');
             } catch (e) {
                 showToast('Failed to filter charts', 'error');
+            }
+        }
+
+        async function setPnlPeriod(period) {
+            if (!period || period === selectedPnlPeriod.value) return;
+            selectedPnlPeriod.value = period;
+            if (!selectedWallet.value) return;
+
+            try {
+                const stats = await api.getWalletStats(
+                    selectedWallet.value.id,
+                    chartStartDate.value,
+                    chartEndDate.value,
+                    selectedPnlPeriod.value
+                );
+                walletStats.value = stats;
+                await nextTick();
+                initWalletCharts();
+            } catch (e) {
+                showToast('Failed to update period', 'error');
             }
         }
 
@@ -631,12 +657,12 @@ createApp({
             showAddWalletModal, newWalletAddress, newWalletName, isAddingWallet, addWalletError,
             showDeleteModal, walletToDelete,
             isEditingName, editedWalletName, startEditingName, cancelEditingName, saveWalletName,
-            isExtendingRange, extendDays, chartStartDate, chartEndDate,
+            isExtendingRange, extendDays, chartStartDate, chartEndDate, selectedPnlPeriod,
             activeTasks, getTaskProgress,
             dashboardVolumeChart, pnlChart, volumeChart, buySellChart, marketPnlChart,
             toasts,
             refreshData, selectWallet, goToWallet, addWallet, refreshWalletData, extendRange, getTimelineData,
-            filterChartsByDateRange, showLastNDays, showAllData,
+            filterChartsByDateRange, showLastNDays, showAllData, setPnlPeriod,
             confirmDeleteWallet, deleteWallet, exportTrades,
             formatNumber, formatCurrency, formatAddress, formatDateTime, formatDate,
         };

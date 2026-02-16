@@ -22,10 +22,14 @@ class WalletSerializer(serializers.ModelSerializer):
         ]
 
     def get_trades_count(self, obj):
-        return obj.trades.count()
+        annotated = getattr(obj, 'trade_count', None)
+        return annotated if annotated is not None else obj.trades.count()
 
     def get_unique_markets(self, obj):
-        return obj.trades.values('market').distinct().count()
+        annotated = getattr(obj, 'unique_markets', None)
+        if annotated is not None:
+            return annotated
+        return obj.trades.order_by().values('market_id').distinct().count()
 
     def get_realized_pnl(self, obj):
         """Return stored P&L (calculated on refresh)."""
@@ -47,10 +51,14 @@ class WalletSummarySerializer(serializers.ModelSerializer):
         ]
 
     def get_trades_count(self, obj):
-        return obj.trades.count()
+        annotated = getattr(obj, 'trade_count', None)
+        return annotated if annotated is not None else obj.trades.count()
 
     def get_unique_markets(self, obj):
-        return obj.trades.values('market').distinct().count()
+        annotated = getattr(obj, 'unique_markets', None)
+        if annotated is not None:
+            return annotated
+        return obj.trades.order_by().values('market_id').distinct().count()
 
     def get_realized_pnl(self, obj):
         """Return stored P&L (calculated on refresh)."""

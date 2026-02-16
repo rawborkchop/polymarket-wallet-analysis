@@ -253,6 +253,26 @@
                             </div>
                         </div>
 
+                        <!-- PnL Period Selector -->
+                        <div class="bg-dark-700 rounded-xl p-4">
+                            <div class="flex flex-wrap items-center gap-2">
+                                <span class="text-xs text-gray-500 mr-2">PnL period:</span>
+                                <button
+                                    v-for="p in ['ALL', '1M', '1W', '1D']"
+                                    :key="p"
+                                    @click="setPnlPeriod(p)"
+                                    :class="[
+                                        'px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors',
+                                        selectedPnlPeriod === p
+                                            ? 'bg-primary-600 text-white'
+                                            : 'bg-dark-800 text-gray-400 hover:text-white'
+                                    ]"
+                                >
+                                    {{ p }}
+                                </button>
+                            </div>
+                        </div>
+
                         <!-- Date Range Timeline -->
                         <div class="bg-dark-700 rounded-xl p-4">
                             <div class="flex items-center justify-between mb-3">
@@ -351,14 +371,17 @@
                             <i class="fas fa-info-circle mr-2"></i>
                             <strong>P&L Data:</strong>
                             <span v-if="walletStats.period_pnl">
-                                P&L for period {{ walletStats.wallet.data_start_date }} to {{ walletStats.wallet.data_end_date }}:
+                                {{ walletStats.period_pnl.period }} P&L:
                                 <span :class="walletStats.period_pnl.calculated_pnl >= 0 ? 'text-green-400' : 'text-red-400'">
                                     {{ formatCurrency(walletStats.period_pnl.calculated_pnl) }}
                                 </span>
-                                (calculated from {{ walletStats.total_trades }} trades)
+                                | All-time:
+                                <span :class="walletStats.period_pnl.total_pnl >= 0 ? 'text-green-400' : 'text-red-400'">
+                                    {{ formatCurrency(walletStats.period_pnl.total_pnl) }}
+                                </span>
                             </span>
                             <span v-else>
-                                P&L calculated from trades in the analyzed period.
+                                P&L calculated from full-history avg cost basis replay.
                             </span>
                         </div>
 
@@ -609,7 +632,19 @@
         </div>
     </div>
 
-    <script src="js/api.js"></script>
-    <script src="js/app.js"></script>
+    <script>
+    // Ngrok workaround: load JS files via fetch with skip-warning header, then eval
+    async function loadScript(url) {
+        const resp = await fetch(url, { headers: { 'ngrok-skip-browser-warning': 'true' } });
+        const text = await resp.text();
+        const script = document.createElement('script');
+        script.textContent = text;
+        document.body.appendChild(script);
+    }
+    (async () => {
+        await loadScript('js/api.js');
+        await loadScript('js/app.js');
+    })();
+    </script>
 </body>
 </html>

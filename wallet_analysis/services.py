@@ -75,7 +75,7 @@ class DatabaseService:
         )
         return market
 
-    def save_trades(self, wallet: Wallet, trades: List[TradeDTO], batch_size: int = 100) -> int:
+    def save_trades(self, wallet: Wallet, trades: List[TradeDTO], batch_size: int = 1000) -> int:
         """
         Save trades to the database in batches to avoid locking.
 
@@ -87,10 +87,11 @@ class DatabaseService:
         inserted = 0
         batch = []
 
-        # Cache markets to reduce DB queries
-        market_cache = {}
+        # Preload markets for this payload to minimize per-row lookups.
+        condition_ids = {t.condition_id for t in trades if getattr(t, 'condition_id', None)}
+        market_cache = {m.condition_id: m for m in Market.objects.filter(condition_id__in=condition_ids)}
 
-        for i, trade_dto in enumerate(trades):
+        for trade_dto in trades:
             # Get or create market (cached)
             market = None
             if trade_dto.condition_id:
@@ -129,20 +130,11 @@ class DatabaseService:
             # Commit batch
             if len(batch) >= batch_size:
                 try:
-                    # Count trades before to detect actual inserts vs duplicates
-                    before_count = Trade.objects.filter(wallet=wallet).count()
                     with transaction.atomic():
-                        Trade.objects.bulk_create(batch, ignore_conflicts=True)
-                    after_count = Trade.objects.filter(wallet=wallet).count()
-                    actually_inserted = after_count - before_count
-                    inserted += actually_inserted
-                    if actually_inserted < len(batch):
-                        logger.warning(
-                            f"Duplicates for {wallet.address}: {len(batch) - actually_inserted}/{len(batch)} ignored"
-                        )
+                        created = Trade.objects.bulk_create(batch, ignore_conflicts=True)
+                    inserted += len(created)
                 except Exception as e:
                     logger.warning(f"Bulk insert failed for {len(batch)} trades, trying individual: {e}")
-                    # On conflict, fall back to individual inserts
                     for trade in batch:
                         try:
                             trade.save()
@@ -154,17 +146,9 @@ class DatabaseService:
         # Final batch
         if batch:
             try:
-                # Count trades before to detect actual inserts vs duplicates
-                before_count = Trade.objects.filter(wallet=wallet).count()
                 with transaction.atomic():
-                    Trade.objects.bulk_create(batch, ignore_conflicts=True)
-                after_count = Trade.objects.filter(wallet=wallet).count()
-                actually_inserted = after_count - before_count
-                inserted += actually_inserted
-                if actually_inserted < len(batch):
-                    logger.warning(
-                        f"Duplicates for {wallet.address}: {len(batch) - actually_inserted}/{len(batch)} ignored"
-                    )
+                    created = Trade.objects.bulk_create(batch, ignore_conflicts=True)
+                inserted += len(created)
             except Exception as e:
                 logger.warning(f"Final bulk insert failed for {len(batch)} trades: {e}")
                 for trade in batch:
@@ -181,7 +165,7 @@ class DatabaseService:
         self,
         wallet: Wallet,
         activity_data: Dict[str, List[dict]],
-        batch_size: int = 100
+        batch_size: int = 1000
     ) -> Dict[str, int]:
         """
         Save activity data (REDEEM, SPLIT, MERGE, REWARD) to database in batches.
@@ -189,10 +173,23 @@ class DatabaseService:
         Returns dict with count of inserted items per type.
         """
         counts = {}
-        market_cache = {}
+
+        payload_condition_ids = set()
+        for items in activity_data.values():
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                condition_id = item.get('conditionId')
+                if condition_id:
+                    payload_condition_ids.add(condition_id)
+        market_cache = {m.condition_id: m for m in Market.objects.filter(condition_id__in=payload_condition_ids)}
 
         for activity_type, items in activity_data.items():
-            if activity_type == 'TRADE':
+            # Skip non-persisted keys (trade rows are stored in Trade table, and
+            # metadata keys such as _errors are not activity payloads).
+            if activity_type == 'TRADE' or activity_type.startswith('_'):
+                continue
+            if not isinstance(items, list):
                 continue
 
             batch = []
@@ -223,17 +220,17 @@ class DatabaseService:
                         datetime=timestamp_to_datetime(ts) if ts else timezone.now(),
                         size=Decimal(str(item.get('size', 0))),
                         usdc_size=Decimal(str(item.get('usdcSize', 0))),
+                        asset=item.get('asset', ''),
+                        outcome=item.get('outcome', ''),
                         title=item.get('title', ''),
                     ))
 
                     # Commit batch
                     if len(batch) >= batch_size:
                         try:
-                            before_count = Activity.objects.filter(wallet=wallet, activity_type=activity_type).count()
                             with transaction.atomic():
-                                Activity.objects.bulk_create(batch, ignore_conflicts=True)
-                            after_count = Activity.objects.filter(wallet=wallet, activity_type=activity_type).count()
-                            inserted += (after_count - before_count)
+                                created = Activity.objects.bulk_create(batch, ignore_conflicts=True)
+                            inserted += len(created)
                         except Exception as e:
                             logger.warning(f"Bulk insert failed for {activity_type} activities: {e}")
                         batch = []
@@ -248,11 +245,9 @@ class DatabaseService:
             # Final batch
             if batch:
                 try:
-                    before_count = Activity.objects.filter(wallet=wallet, activity_type=activity_type).count()
                     with transaction.atomic():
-                        Activity.objects.bulk_create(batch, ignore_conflicts=True)
-                    after_count = Activity.objects.filter(wallet=wallet, activity_type=activity_type).count()
-                    inserted += (after_count - before_count)
+                        created = Activity.objects.bulk_create(batch, ignore_conflicts=True)
+                    inserted += len(created)
                 except Exception as e:
                     logger.warning(f"Final bulk insert failed for {activity_type} activities: {e}")
 
@@ -263,7 +258,99 @@ class DatabaseService:
         total_saved = sum(counts.values())
         total_provided = sum(len(items) for k, items in activity_data.items() if k != 'TRADE')
         logger.info(f"Activity save complete for {wallet.address}: {total_saved}/{total_provided} saved")
+
+        # Backfill: update existing activities that have empty asset/outcome
+        # with data from the incoming payload (re-fetched from API).
+        backfilled = self._backfill_activity_fields(wallet, activity_data, market_cache)
+        if backfilled > 0:
+            logger.info(f"Backfilled asset/outcome on {backfilled} activities for {wallet.address}")
+
         return counts
+
+    def _backfill_activity_fields(
+        self,
+        wallet: Wallet,
+        activity_data: Dict[str, List[dict]],
+        market_cache: Dict[str, Market],
+    ) -> int:
+        """
+        Update existing activities that have empty asset/outcome fields.
+
+        When activities are first fetched, they may lack asset/outcome data.
+        On subsequent fetches the API may provide this data. Since bulk_create
+        with ignore_conflicts=True won't update existing rows, we do a
+        targeted update here.
+        """
+        # Collect incoming items that have asset or outcome data
+        backfill_candidates = []
+        for activity_type, items in activity_data.items():
+            if activity_type == 'TRADE' or activity_type.startswith('_'):
+                continue
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                asset = item.get('asset', '')
+                outcome = item.get('outcome', '')
+                if not asset and not outcome:
+                    continue
+                backfill_candidates.append({
+                    'activity_type': activity_type,
+                    'transaction_hash': item.get('transactionHash', ''),
+                    'timestamp': item.get('timestamp', 0),
+                    'asset': asset,
+                    'outcome': outcome,
+                })
+
+        if not backfill_candidates:
+            return 0
+
+        # Find existing activities for this wallet that have empty asset/outcome
+        empty_activities = Activity.objects.filter(
+            wallet=wallet,
+            asset='',
+        ).values_list('id', 'transaction_hash', 'activity_type', 'timestamp')
+
+        # Build lookup by (tx_hash, activity_type, timestamp)
+        empty_lookup = {}
+        for pk, tx_hash, act_type, ts in empty_activities:
+            empty_lookup[(tx_hash, act_type, ts)] = pk
+
+        # Match candidates to existing records
+        to_update = []
+        for candidate in backfill_candidates:
+            key = (
+                candidate['transaction_hash'],
+                candidate['activity_type'],
+                candidate['timestamp'],
+            )
+            pk = empty_lookup.get(key)
+            if pk is not None:
+                activity = Activity(pk=pk, asset=candidate['asset'], outcome=candidate['outcome'])
+                # We need to set all fields for bulk_update, so fetch the full object
+                to_update.append((pk, candidate['asset'], candidate['outcome']))
+
+        if not to_update:
+            return 0
+
+        # Bulk update in batches
+        updated = 0
+        batch_size = 100
+        for i in range(0, len(to_update), batch_size):
+            batch = to_update[i:i + batch_size]
+            pks = [pk for pk, _, _ in batch]
+            activities = {a.pk: a for a in Activity.objects.filter(pk__in=pks)}
+            update_objs = []
+            for pk, asset, outcome in batch:
+                if pk in activities:
+                    act = activities[pk]
+                    act.asset = asset
+                    act.outcome = outcome
+                    update_objs.append(act)
+            if update_objs:
+                Activity.objects.bulk_update(update_objs, ['asset', 'outcome'])
+                updated += len(update_objs)
+
+        return updated
 
     @transaction.atomic
     def save_positions_from_subgraph(
@@ -278,22 +365,23 @@ class DatabaseService:
         # Clear existing positions for this wallet
         Position.objects.filter(wallet=wallet).delete()
 
-        inserted = 0
+        objects = []
         for pos in positions:
             try:
-                Position.objects.create(
+                objects.append(Position(
                     wallet=wallet,
                     token_id=pos.get('tokenId', ''),
                     amount=Decimal(str(float(pos.get('amount', 0)) / 1e6)),
                     avg_price=Decimal(str(float(pos.get('avgPrice', 0)) / 1e6)),
                     realized_pnl=Decimal(str(float(pos.get('realizedPnl', 0)) / 1e6)),
                     total_bought=Decimal(str(float(pos.get('totalBought', 0)) / 1e6)),
-                )
-                inserted += 1
+                ))
             except Exception:
                 continue
 
-        return inserted
+        if objects:
+            Position.objects.bulk_create(objects)
+        return len(objects)
 
     @transaction.atomic
     def save_current_positions(
@@ -308,19 +396,24 @@ class DatabaseService:
         # Clear existing current positions for this wallet
         CurrentPosition.objects.filter(wallet=wallet).delete()
 
-        inserted = 0
+        market_cache = {}
+        objects = []
         for pos in positions:
             try:
-                # Get or create market
+                # Get or create market (cached)
                 market = None
                 condition_id = pos.get('conditionId')
                 if condition_id:
-                    market, _ = Market.objects.get_or_create(
-                        condition_id=condition_id,
-                        defaults={'title': pos.get('title', '')}
-                    )
+                    if condition_id not in market_cache:
+                        market, _ = Market.objects.get_or_create(
+                            condition_id=condition_id,
+                            defaults={'title': pos.get('title', '')}
+                        )
+                        market_cache[condition_id] = market
+                    else:
+                        market = market_cache[condition_id]
 
-                CurrentPosition.objects.create(
+                objects.append(CurrentPosition(
                     wallet=wallet,
                     market=market,
                     asset=pos.get('asset', ''),
@@ -335,12 +428,13 @@ class DatabaseService:
                     cur_price=Decimal(str(pos.get('curPrice', 0))),
                     redeemable=pos.get('redeemable', False),
                     end_date=pos.get('endDate') or None,
-                )
-                inserted += 1
+                ))
             except Exception:
                 continue
 
-        return inserted
+        if objects:
+            CurrentPosition.objects.bulk_create(objects)
+        return len(objects)
 
     @transaction.atomic
     def save_analysis_run(
@@ -417,22 +511,38 @@ class DatabaseService:
         if not resolutions:
             return 0
 
-        updated = 0
-        for condition_id, resolution in resolutions.items():
-            try:
-                Market.objects.update_or_create(
-                    condition_id=condition_id,
-                    defaults={
-                        'resolved': resolution.get('resolved', False),
-                        'winning_outcome': resolution.get('winning_outcome', ''),
-                        'resolution_timestamp': resolution.get('resolution_timestamp'),
-                    }
-                )
-                updated += 1
-            except Exception:
-                continue
+        condition_ids = list(resolutions.keys())
+        existing = {m.condition_id: m for m in Market.objects.filter(condition_id__in=condition_ids)}
 
-        return updated
+        to_update = []
+        to_create = []
+
+        for condition_id, resolution in resolutions.items():
+            resolved = resolution.get('resolved', False)
+            winning_outcome = resolution.get('winning_outcome') or ''
+            resolution_timestamp = resolution.get('resolution_timestamp')
+
+            if condition_id in existing:
+                market = existing[condition_id]
+                market.resolved = resolved
+                market.winning_outcome = winning_outcome
+                market.resolution_timestamp = resolution_timestamp
+                to_update.append(market)
+            else:
+                to_create.append(Market(
+                    condition_id=condition_id,
+                    title='',
+                    resolved=resolved,
+                    winning_outcome=winning_outcome,
+                    resolution_timestamp=resolution_timestamp,
+                ))
+
+        if to_update:
+            Market.objects.bulk_update(to_update, ['resolved', 'winning_outcome', 'resolution_timestamp'])
+        if to_create:
+            Market.objects.bulk_create(to_create, ignore_conflicts=True)
+
+        return len(to_update) + len(to_create)
 
     # Query methods
 

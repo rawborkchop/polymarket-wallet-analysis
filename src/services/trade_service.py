@@ -17,17 +17,6 @@ class TradeService:
     def __init__(self, trade_fetcher: ITradeFetcher):
         self._trade_fetcher = trade_fetcher
 
-    def get_all_trades(
-        self,
-        wallet_address: str,
-        after_timestamp: Optional[int] = None,
-        before_timestamp: Optional[int] = None,
-    ) -> List[Trade]:
-        """Fetch all trades for a wallet."""
-        return self._trade_fetcher.fetch_all_trades(
-            wallet_address, after_timestamp, before_timestamp
-        )
-
     def get_all_activity(
         self,
         wallet_address: str,

@@ -207,9 +207,9 @@ class AnalyticsService(IAnalyzer):
         buys = [t for t in trades if t.is_buy]
         sells = [t for t in trades if t.is_sell]
 
-        total_volume = float(sum(t.total_value for t in trades))
-        total_buy_volume = float(sum(t.total_value for t in buys))
-        total_sell_volume = float(sum(t.total_value for t in sells))
+        total_volume = float(sum(t.size for t in trades))
+        total_buy_volume = float(sum(t.size for t in buys))
+        total_sell_volume = float(sum(t.size for t in sells))
 
         unique_markets = len(set(t.condition_id for t in trades))
 
@@ -275,7 +275,7 @@ class AnalyticsService(IAnalyzer):
 
         for trade in trades:
             market_data[trade.condition_id]["trades"] += 1
-            market_data[trade.condition_id]["volume"] += float(trade.total_value)
+            market_data[trade.condition_id]["volume"] += float(trade.size)
             market_data[trade.condition_id]["title"] = trade.title
 
         for key, pos in positions.items():

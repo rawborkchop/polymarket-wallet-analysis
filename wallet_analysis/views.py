@@ -64,19 +64,7 @@ class WalletViewSet(viewsets.ReadOnlyModelViewSet):
 
         wallet = self.get_object()
 
-        # Auto-calculate date range from trades if not set
-        if wallet.data_start_date is None or wallet.data_end_date is None:
-            trade_dates = wallet.trades.aggregate(
-                min_date=Min('datetime'),
-                max_date=Max('datetime')
-            )
-            if trade_dates['min_date']:
-                wallet.data_start_date = trade_dates['min_date'].date()
-                wallet.data_end_date = trade_dates['max_date'].date()
-                wallet.save(update_fields=['data_start_date', 'data_end_date'])
-
         # Parse optional date range filters for charts
-        from django.utils import timezone
         chart_start = request.query_params.get('chart_start')
         chart_end = request.query_params.get('chart_end')
 
@@ -100,6 +88,14 @@ class WalletViewSet(viewsets.ReadOnlyModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
+        period = (request.query_params.get('period') or '1M').upper()
+        valid_periods = {'ALL', '1M', '1W', '1D'}
+        if period not in valid_periods:
+            return Response(
+                {'error': 'Invalid period. Use one of: ALL, 1M, 1W, 1D'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         # Trade stats (filtered by date range if specified)
         trades = wallet.trades.all()
         if start_date_obj:
@@ -111,11 +107,11 @@ class WalletViewSet(viewsets.ReadOnlyModelViewSet):
             total_trades=Count('id'),
             total_buys=Count('id', filter=Q(side='BUY')),
             total_sells=Count('id', filter=Q(side='SELL')),
-            total_volume=Sum('total_value'),
+            total_volume=Sum('size'),
         )
 
         # Unique markets (also filtered)
-        unique_markets = trades.values('market').distinct().count()
+        unique_markets = trades.order_by().values('market_id').distinct().count()
 
         # Activity by type (filtered by date range if specified)
         activities = wallet.activities.all()
@@ -132,18 +128,72 @@ class WalletViewSet(viewsets.ReadOnlyModelViewSet):
             )
         }
 
-        # Calculate real P&L from trades and activities
-        from .pnl_calculator import calculate_wallet_pnl, calculate_wallet_pnl_filtered
+        # Avg cost basis P&L is read from cached AnalysisRun payload.
+        # Replay is never done on the normal request path.
+        from datetime import timedelta
+        from django.db.models import Max
+        from django.utils import timezone
+        from .calculators.pnl_calculator import AvgCostBasisCalculator
 
-        # Use filtered version if date range specified, otherwise full P&L
-        if start_date_obj or end_date_obj:
-            pnl_result = calculate_wallet_pnl_filtered(wallet, start_date_obj, end_date_obj)
+        latest_analysis_for_cache = wallet.analysis_runs.prefetch_related('copy_scenarios').first()
+        cache_payload = latest_analysis_for_cache.avg_cost_cache if latest_analysis_for_cache else None
+
+        trade_fingerprint = wallet.trades.aggregate(count=Count('id'), max_id=Max('id'))
+        activity_fingerprint = wallet.activities.aggregate(count=Count('id'), max_id=Max('id'))
+        trade_count = trade_fingerprint['count'] or 0
+        activity_count = activity_fingerprint['count'] or 0
+        max_trade_id = trade_fingerprint['max_id']
+        max_activity_id = activity_fingerprint['max_id']
+
+        ttl_cutoff = timezone.now() - timedelta(minutes=5)
+        period_cache = cache_payload.get(period) if isinstance(cache_payload, dict) else None
+        cache_valid = (
+            latest_analysis_for_cache is not None
+            and period_cache is not None
+            and latest_analysis_for_cache.avg_cost_cache_trade_count == trade_count
+            and latest_analysis_for_cache.avg_cost_cache_activity_count == activity_count
+            and latest_analysis_for_cache.avg_cost_cache_max_trade_id == max_trade_id
+            and latest_analysis_for_cache.avg_cost_cache_max_activity_id == max_activity_id
+            and latest_analysis_for_cache.avg_cost_cache_updated_at is not None
+            and latest_analysis_for_cache.avg_cost_cache_updated_at >= ttl_cutoff
+        )
+
+        if cache_valid:
+            pnl_result = period_cache
+        elif isinstance(cache_payload, dict) and cache_payload and period in cache_payload:
+            # Cache exists for this specific period (stale but usable).
+            pnl_result = cache_payload[period]
         else:
-            pnl_result = calculate_wallet_pnl(wallet)
-            # Update cache ONLY with full P&L (not filtered) so list view stays in sync
-            wallet.subgraph_realized_pnl = pnl_result['total_realized_pnl']
-            wallet.subgraph_total_bought = pnl_result['totals'].get('total_buys', 0) + pnl_result['totals'].get('total_splits', 0)
-            wallet.save(update_fields=['subgraph_realized_pnl', 'subgraph_total_bought'])
+            # One-time bootstrap when no cache exists yet.
+            pnl_result = AvgCostBasisCalculator(wallet.id).calculate(period=period)
+            if latest_analysis_for_cache is None:
+                latest_analysis_for_cache = AnalysisRun.objects.create(
+                    wallet=wallet,
+                    period_start_hours_ago=0,
+                    period_end_hours_ago=0,
+                    total_trades=trade_count,
+                )
+                cache_payload = {}
+            elif not isinstance(cache_payload, dict):
+                cache_payload = {}
+
+            cache_payload[period] = pnl_result
+            latest_analysis_for_cache.avg_cost_cache = cache_payload
+            latest_analysis_for_cache.avg_cost_cache_trade_count = trade_count
+            latest_analysis_for_cache.avg_cost_cache_activity_count = activity_count
+            latest_analysis_for_cache.avg_cost_cache_max_trade_id = max_trade_id
+            latest_analysis_for_cache.avg_cost_cache_max_activity_id = max_activity_id
+            latest_analysis_for_cache.avg_cost_cache_updated_at = timezone.now()
+            latest_analysis_for_cache.save(
+                update_fields=[
+                    'avg_cost_cache',
+                    'avg_cost_cache_trade_count',
+                    'avg_cost_cache_activity_count',
+                    'avg_cost_cache_max_trade_id',
+                    'avg_cost_cache_max_activity_id',
+                    'avg_cost_cache_updated_at',
+                ]
+            )
 
         # Daily P&L already comes filtered from the calculator
         daily_pnl_data = pnl_result['daily_pnl']
@@ -152,17 +202,16 @@ class WalletViewSet(viewsets.ReadOnlyModelViewSet):
         daily_volume = list(reversed(daily_pnl_data))
 
         # P&L by market from the calculator (includes redeems, merges, etc.)
-        # Enrich with market titles
+        # Enrich with market titles via single batch query
         from .models import Market
         pnl_by_market = pnl_result.get('pnl_by_market', [])[:10]
+        market_ids = [e.get('market_id') for e in pnl_by_market if e.get('market_id') and e.get('market_id') != 'unknown']
+        markets_by_id = Market.objects.in_bulk(market_ids) if market_ids else {}
         for entry in pnl_by_market:
             market_id = entry.get('market_id')
             if market_id and market_id != 'unknown':
-                try:
-                    market = Market.objects.get(pk=market_id)
-                    entry['market__title'] = market.title
-                except Market.DoesNotExist:
-                    entry['market__title'] = f'Market #{market_id}'
+                market = markets_by_id.get(market_id)
+                entry['market__title'] = market.title if market else f'Market #{market_id}'
             else:
                 entry['market__title'] = 'Unknown'
             # Rename for frontend compatibility
@@ -172,12 +221,15 @@ class WalletViewSet(viewsets.ReadOnlyModelViewSet):
 
         # ROI calculation based on calculated P&L
         # total_outflows = buys + splits (money spent)
-        total_bought = pnl_result['totals'].get('total_buys', 0) + pnl_result['totals'].get('total_splits', 0)
-        realized_pnl = pnl_result['total_realized_pnl']
+        total_bought = pnl_result['totals'].get('total_buys', 0)
+        all_time_pnl = pnl_result['total_pnl']
+        period_pnl_value = pnl_result['period_pnl']
+        # The headline PnL should reflect the selected period
+        realized_pnl = period_pnl_value
         roi_percent = (realized_pnl / total_bought * 100) if total_bought > 0 else 0
 
         # Latest analysis with copy trading scenarios
-        latest_analysis = wallet.analysis_runs.prefetch_related('copy_scenarios').order_by('-timestamp').first()
+        latest_analysis = latest_analysis_for_cache
         copy_trading_data = None
         analysis_metrics = None
 
@@ -220,12 +272,12 @@ class WalletViewSet(viewsets.ReadOnlyModelViewSet):
         merge_redeem_market_ids = set(
             wallet.activities.filter(activity_type__in=['MERGE', 'REDEEM'])
             .exclude(market_id__isnull=True)
-            .values_list('market_id', flat=True).distinct()
+            .order_by().values_list('market_id', flat=True).distinct()
         )
         if merge_redeem_market_ids:
             markets_with_buys = set(
                 wallet.trades.filter(market_id__in=merge_redeem_market_ids, side='BUY')
-                .values_list('market_id', flat=True).distinct()
+                .order_by().values_list('market_id', flat=True).distinct()
             )
             data_coverage_pct = round(len(markets_with_buys) / len(merge_redeem_market_ids) * 100, 1)
         else:
@@ -236,8 +288,12 @@ class WalletViewSet(viewsets.ReadOnlyModelViewSet):
                 'address': wallet.address,
                 'name': wallet.name,
                 'realized_pnl': realized_pnl,
+                'unrealized_pnl': 0,
+                'total_pnl': realized_pnl,
+                'cash_flow_pnl': realized_pnl,
                 'total_bought': total_bought,
                 'roi_percent': round(roi_percent, 2),
+                'selected_period': period,
                 'last_updated': wallet.last_updated.isoformat() if wallet.last_updated else None,
                 'data_start_date': wallet.data_start_date.isoformat() if wallet.data_start_date else None,
                 'data_end_date': wallet.data_end_date.isoformat() if wallet.data_end_date else None,
@@ -249,10 +305,13 @@ class WalletViewSet(viewsets.ReadOnlyModelViewSet):
             'unique_markets': unique_markets,
             'activity_by_type': activity_by_type,
             'daily_pnl': daily_volume,
-            'pnl_by_market': pnl_result.get('pnl_by_market', [])[:10],  # Use real P&L by market
+            'pnl_by_market': pnl_result.get('pnl_by_market', [])[:10],
+            'positions': pnl_result.get('positions', [])[:20],
             'period_pnl': {
-                'calculated_pnl': pnl_result['total_realized_pnl'],
-                'note': f"P&L calculated from {wallet.data_start_date} to {wallet.data_end_date}"
+                'period': period,
+                'calculated_pnl': period_pnl_value,
+                'total_pnl': all_time_pnl,
+                'note': 'P&L served from cached avg-cost replay data' if cache_valid else 'P&L served from last available cache snapshot'
             },
             'analysis_metrics': analysis_metrics,
             'copy_trading': copy_trading_data,
@@ -341,12 +400,13 @@ class DashboardView(APIView):
         # Overall stats
         total_wallets = Wallet.objects.count()
         total_trades = Trade.objects.count()
-        total_volume = Trade.objects.aggregate(total=Sum('total_value'))['total'] or 0
+        total_volume = Trade.objects.aggregate(total=Sum('size'))['total'] or 0
         total_analyses = AnalysisRun.objects.count()
 
         # Top wallets by trades count
         top_wallets = Wallet.objects.annotate(
-            trade_count=Count('trades')
+            trade_count=Count('trades'),
+            unique_markets=Count('trades__market', distinct=True),
         ).order_by('-trade_count')[:5]
 
         # Recent analyses
@@ -364,6 +424,111 @@ class DashboardView(APIView):
         return Response(data)
 
 
+def _bg_fetch_wallet(task_id, wallet_id, start_date=None, end_date=None):
+    """Background task: fetch wallet data (runs in a daemon thread)."""
+    import django
+    from datetime import datetime, timedelta
+    from django.db.models import Min, Max, Count
+    from wallet_analysis.models import Wallet
+    from wallet_analysis.services import DatabaseService
+    from wallet_analysis.background import update_progress
+    from src.api.polymarket_client import PolymarketClient
+    from src.services.trade_service import TradeService
+    from src.services.analytics_service import AnalyticsService
+    from src.services.copy_trading_analyzer import CopyTradingAnalyzer
+
+    # Close old DB connections for thread safety
+    django.db.connections.close_all()
+
+    wallet = Wallet.objects.get(pk=wallet_id)
+    address = wallet.address
+    update_progress(task_id, 5, 'initializing')
+
+    db_service = DatabaseService()
+    client = PolymarketClient()
+    trade_service = TradeService(client)
+
+    now = datetime.now()
+    if end_date:
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d') if isinstance(end_date, str) else datetime.combine(end_date, datetime.max.time())
+        before_timestamp = int(datetime.combine(end_dt.date(), datetime.max.time()).timestamp())
+    else:
+        before_timestamp = int(now.timestamp())
+
+    if start_date:
+        start_dt = datetime.strptime(start_date, '%Y-%m-%d') if isinstance(start_date, str) else datetime.combine(start_date, datetime.min.time())
+        after_timestamp = int(datetime.combine(start_dt.date(), datetime.min.time()).timestamp())
+    else:
+        after_timestamp = int(now.timestamp() - (30 * 24 * 3600))
+
+    # Fetch
+    update_progress(task_id, 10, 'fetching_activity')
+    activity_result = trade_service.get_all_activity(address, after_timestamp, before_timestamp)
+    trades = activity_result.get("trades", [])
+    raw_activity = activity_result.get("raw_activity", {})
+    cash_flow = activity_result.get("cash_flow", {})
+
+    # Save
+    update_progress(task_id, 50, 'saving_trades', trades_count=len(trades))
+    if trades:
+        db_service.save_trades(wallet, trades)
+    if raw_activity:
+        db_service.save_activities(wallet, raw_activity)
+
+    # Update date range
+    update_progress(task_id, 70, 'updating_wallet')
+    trade_dates = wallet.trades.aggregate(min_date=Min('datetime'), max_date=Max('datetime'))
+    activity_dates = wallet.activities.aggregate(min_date=Min('datetime'), max_date=Max('datetime'))
+    actual_min = min(filter(None, [trade_dates['min_date'], activity_dates['min_date']]), default=None)
+    actual_max = max(filter(None, [trade_dates['max_date'], activity_dates['max_date']]), default=None)
+    if actual_min:
+        wallet.data_start_date = actual_min.date() if hasattr(actual_min, 'date') else actual_min
+    if actual_max:
+        wallet.data_end_date = actual_max.date() if hasattr(actual_max, 'date') else actual_max
+    wallet.save()
+
+    # PnL — cache all periods
+    update_progress(task_id, 80, 'calculating_pnl')
+    from wallet_analysis.calculators.pnl_calculator import AvgCostBasisCalculator
+    avg_cost_cache = {}
+    try:
+        calculator = AvgCostBasisCalculator(wallet.id)
+        for p in ('ALL', '1M', '1W', '1D'):
+            avg_cost_cache[p] = calculator.calculate(period=p)
+        pnl_result = avg_cost_cache['ALL']
+        wallet.subgraph_realized_pnl = pnl_result['total_pnl']
+        wallet.subgraph_total_bought = pnl_result['totals'].get('total_buys', 0)
+        wallet.save(update_fields=['subgraph_realized_pnl', 'subgraph_total_bought'])
+    except Exception as e:
+        print(f"PnL calc error (non-fatal): {e}")
+
+    # Analytics
+    update_progress(task_id, 90, 'running_analytics')
+    if trades:
+        analytics_service = AnalyticsService()
+        copy_trading_analyzer = CopyTradingAnalyzer(use_percentage=False)
+        analytics = analytics_service.analyze(trades)
+        resolutions = analytics.pop("_resolutions", {})
+        copy_analysis = copy_trading_analyzer.analyze(trades, resolutions, cash_flow)
+        db_service.save_market_resolutions(resolutions)
+        period_hours = int((before_timestamp - after_timestamp) / 3600)
+        db_service.save_analysis_run(
+            wallet=wallet,
+            summary=analytics.get("summary", {}),
+            cash_flow=cash_flow,
+            performance=analytics.get("performance", {}),
+            period_start_hours=period_hours,
+            period_end_hours=0,
+        )
+
+    return {
+        'status': 'success',
+        'wallet_id': wallet_id,
+        'trades_count': len(trades),
+        'realized_pnl': float(wallet.subgraph_realized_pnl or 0),
+    }
+
+
 @api_view(['POST'])
 def add_wallet(request):
     """
@@ -372,7 +537,7 @@ def add_wallet(request):
     Body: {"address": "0x...", "name": "Optional name"}
     """
     from wallet_analysis.services import DatabaseService
-    from wallet_analysis.tasks import fetch_wallet_data
+    from wallet_analysis.background import run_in_background
 
     address = request.data.get('address', '').strip().lower()
     name = request.data.get('name', '')
@@ -395,13 +560,13 @@ def add_wallet(request):
     # Create wallet
     wallet = db_service.get_or_create_wallet(address, name=name)
 
-    # Start Celery task for background fetch
-    task = fetch_wallet_data.delay(wallet.id)
+    # Start background fetch (no Celery needed)
+    task_id = run_in_background(_bg_fetch_wallet, wallet.id)
 
     return Response({
         'wallet_id': wallet.id,
         'address': wallet.address,
-        'task_id': task.id,
+        'task_id': task_id,
         'status': 'added',
         'message': 'Wallet added, fetching data in background...'
     }, status=status.HTTP_201_CREATED)
@@ -412,19 +577,18 @@ def refresh_wallet(request, pk):
     """
     POST /api/wallets/{id}/refresh/ - Refresh wallet data.
     """
-    from wallet_analysis.tasks import fetch_wallet_data
+    from wallet_analysis.background import run_in_background
 
     try:
         wallet = Wallet.objects.get(pk=pk)
     except Wallet.DoesNotExist:
         return Response({'error': 'Wallet not found'}, status=status.HTTP_404_NOT_FOUND)
 
-    # Start Celery task for refresh
-    task = fetch_wallet_data.delay(wallet.id)
+    task_id = run_in_background(_bg_fetch_wallet, wallet.id)
 
     return Response({
         'status': 'refreshing',
-        'task_id': task.id,
+        'task_id': task_id,
         'message': 'Wallet refresh started in background'
     })
 
@@ -434,21 +598,24 @@ def task_status(request, task_id):
     """
     GET /api/tasks/{task_id}/ - Get status of a background task.
     """
-    from celery.result import AsyncResult
+    from wallet_analysis.background import get_task
 
-    task = AsyncResult(task_id)
+    info = get_task(task_id)
 
     response = {
         'task_id': task_id,
-        'status': task.status,
+        'status': info.get('status', 'UNKNOWN'),
     }
 
-    if task.status == 'PROGRESS':
-        response['progress'] = task.info
-    elif task.status == 'SUCCESS':
-        response['result'] = task.result
-    elif task.status == 'FAILURE':
-        response['error'] = str(task.result)
+    if info.get('status') == 'PROGRESS':
+        response['progress'] = {
+            'stage': info.get('stage', ''),
+            'progress': info.get('progress', 0),
+        }
+    elif info.get('status') == 'SUCCESS':
+        response['result'] = info.get('result')
+    elif info.get('status') == 'FAILURE':
+        response['error'] = info.get('error')
 
     return Response(response)
 
@@ -500,7 +667,7 @@ def extend_wallet_range(request, pk):
     Or: {"start_date": "2024-01-01", "end_date": "2024-01-31"}
     """
     from datetime import datetime, timedelta
-    from wallet_analysis.tasks import fetch_wallet_data
+    from wallet_analysis.background import run_in_background
 
     try:
         wallet = Wallet.objects.get(pk=pk)
@@ -533,16 +700,15 @@ def extend_wallet_range(request, pk):
     else:
         return Response({'error': 'Provide direction (backward/forward/all) or start_date/end_date'}, status=status.HTTP_400_BAD_REQUEST)
 
-    # Start Celery task
-    task = fetch_wallet_data.delay(
-        wallet.id,
+    task_id = run_in_background(
+        _bg_fetch_wallet, wallet.id,
         start_date=start_date.strftime('%Y-%m-%d'),
-        end_date=end_date.strftime('%Y-%m-%d')
+        end_date=end_date.strftime('%Y-%m-%d'),
     )
 
     return Response({
         'status': 'extending',
-        'task_id': task.id,
+        'task_id': task_id,
         'message': f'Fetching data from {start_date} to {end_date}',
         'start_date': str(start_date),
         'end_date': str(end_date),
@@ -597,19 +763,41 @@ def _refresh_wallet_data(wallet, timeout_minutes=5, start_date=None, end_date=No
         trades = activity_result.get("trades", [])
         raw_activity = activity_result.get("raw_activity", {})
         cash_flow = activity_result.get("cash_flow", {})
+        activity_errors = raw_activity.get("_errors", {})
+        non_trade_activity_count = sum(
+            len(items)
+            for activity_type, items in raw_activity.items()
+            if activity_type not in ("TRADE", "_errors") and isinstance(items, list)
+        )
+        print(
+            f"Fetched activity for {address}: trades={len(trades)} "
+            f"non_trade_activities={non_trade_activity_count} errors={activity_errors}"
+        )
 
         # Save trades
         if trades:
             db_service.save_trades(wallet, trades)
+        if raw_activity:
             db_service.save_activities(wallet, raw_activity)
 
-        # Update date range - expand if new range extends beyond existing
-        if wallet.data_start_date is None or start_date < wallet.data_start_date:
-            wallet.data_start_date = start_date
-        if wallet.data_end_date is None or end_date > wallet.data_end_date:
-            wallet.data_end_date = end_date
+        # Update date range from actual saved data (not request params)
+        trade_dates = wallet.trades.aggregate(min_date=Min('datetime'), max_date=Max('datetime'))
+        activity_dates = wallet.activities.aggregate(min_date=Min('datetime'), max_date=Max('datetime'))
+        actual_min = min(filter(None, [trade_dates['min_date'], activity_dates['min_date']]), default=None)
+        actual_max = max(filter(None, [trade_dates['max_date'], activity_dates['max_date']]), default=None)
+        if actual_min:
+            wallet.data_start_date = actual_min.date() if hasattr(actual_min, 'date') else actual_min
+        if actual_max:
+            wallet.data_end_date = actual_max.date() if hasattr(actual_max, 'date') else actual_max
 
         wallet.save()
+
+        # Keep wallet-level cached P&L consistent with the avg cost calculator.
+        from wallet_analysis.calculators.pnl_calculator import AvgCostBasisCalculator
+        pnl_result = AvgCostBasisCalculator(wallet.id).calculate(period='ALL')
+        wallet.subgraph_realized_pnl = pnl_result['total_pnl']
+        wallet.subgraph_total_bought = pnl_result['totals'].get('total_buys', 0)
+        wallet.save(update_fields=['subgraph_realized_pnl', 'subgraph_total_bought'])
 
         # Run analytics if we have trades
         if trades:

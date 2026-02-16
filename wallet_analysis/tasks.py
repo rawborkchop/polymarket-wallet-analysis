@@ -8,6 +8,7 @@ Django server to remain responsive while fetching wallet data.
 from celery import shared_task
 from celery.utils.log import get_task_logger
 from datetime import datetime, time, timedelta
+from django.utils import timezone
 
 logger = get_task_logger(__name__)
 
@@ -84,8 +85,20 @@ def fetch_wallet_data(self, wallet_id: int, start_date: str = None, end_date: st
         trades = activity_result.get("trades", [])
         raw_activity = activity_result.get("raw_activity", {})
         cash_flow = activity_result.get("cash_flow", {})
+        activity_errors = raw_activity.get("_errors", {})
+        non_trade_activity_count = sum(
+            len(items)
+            for activity_type, items in raw_activity.items()
+            if activity_type not in ("TRADE", "_errors") and isinstance(items, list)
+        )
 
-        logger.info(f"Fetched {len(trades)} trades for {address}")
+        logger.info(
+            "Fetched activity for %s: trades=%s non_trade_activities=%s errors=%s",
+            address,
+            len(trades),
+            non_trade_activity_count,
+            activity_errors,
+        )
 
         # Stage 2: Save trades
         self.update_state(state='PROGRESS', meta={
@@ -98,6 +111,7 @@ def fetch_wallet_data(self, wallet_id: int, start_date: str = None, end_date: st
 
         if trades:
             db_service.save_trades(wallet, trades)
+        if raw_activity:
             db_service.save_activities(wallet, raw_activity)
 
         # Stage 3: Update wallet date range
@@ -108,20 +122,31 @@ def fetch_wallet_data(self, wallet_id: int, start_date: str = None, end_date: st
             'progress': 70
         })
 
-        # Update date range (expand, don't replace)
-        if wallet.data_start_date is None or start_date_obj < wallet.data_start_date:
-            wallet.data_start_date = start_date_obj
-        if wallet.data_end_date is None or end_date_obj > wallet.data_end_date:
-            wallet.data_end_date = end_date_obj
+        # Update date range from actual saved data (not request params)
+        from django.db.models import Min, Max
+        trade_dates = wallet.trades.aggregate(min_date=Min('datetime'), max_date=Max('datetime'))
+        activity_dates = wallet.activities.aggregate(min_date=Min('datetime'), max_date=Max('datetime'))
+        actual_min = min(filter(None, [trade_dates['min_date'], activity_dates['min_date']]), default=None)
+        actual_max = max(filter(None, [trade_dates['max_date'], activity_dates['max_date']]), default=None)
+        if actual_min:
+            wallet.data_start_date = actual_min.date() if hasattr(actual_min, 'date') else actual_min
+        if actual_max:
+            wallet.data_end_date = actual_max.date() if hasattr(actual_max, 'date') else actual_max
 
         wallet.save()
 
-        # Calculate P&L using the single source of truth (pnl_calculator)
-        # This is done AFTER saving trades so pnl_calculator has all data
-        from wallet_analysis.pnl_calculator import calculate_wallet_pnl
-        pnl_result = calculate_wallet_pnl(wallet)
-        wallet.subgraph_realized_pnl = pnl_result['total_realized_pnl']
-        wallet.subgraph_total_bought = pnl_result['totals'].get('total_buys', 0) + pnl_result['totals'].get('total_splits', 0)
+        # Calculate and cache P&L in background (all supported periods).
+        from wallet_analysis.calculators.pnl_calculator import AvgCostBasisCalculator
+        calculator = AvgCostBasisCalculator(wallet.id)
+        avg_cost_cache = {
+            'ALL': calculator.calculate(period='ALL'),
+            '1M': calculator.calculate(period='1M'),
+            '1W': calculator.calculate(period='1W'),
+            '1D': calculator.calculate(period='1D'),
+        }
+        pnl_result = avg_cost_cache['ALL']
+        wallet.subgraph_realized_pnl = pnl_result['total_pnl']
+        wallet.subgraph_total_bought = pnl_result['totals'].get('total_buys', 0)
         wallet.save(update_fields=['subgraph_realized_pnl', 'subgraph_total_bought'])
 
         # Stage 4: Run analytics
@@ -147,6 +172,24 @@ def fetch_wallet_data(self, wallet_id: int, start_date: str = None, end_date: st
                 period_start_hours=period_hours,
                 period_end_hours=0,
             )
+            from django.db.models import Count, Max
+            trade_fp = wallet.trades.aggregate(count=Count('id'), max_id=Max('id'))
+            activity_fp = wallet.activities.aggregate(count=Count('id'), max_id=Max('id'))
+
+            analysis_run.avg_cost_cache = avg_cost_cache
+            analysis_run.avg_cost_cache_trade_count = trade_fp['count'] or 0
+            analysis_run.avg_cost_cache_activity_count = activity_fp['count'] or 0
+            analysis_run.avg_cost_cache_max_trade_id = trade_fp['max_id']
+            analysis_run.avg_cost_cache_max_activity_id = activity_fp['max_id']
+            analysis_run.avg_cost_cache_updated_at = timezone.now()
+            analysis_run.save(update_fields=[
+                'avg_cost_cache',
+                'avg_cost_cache_trade_count',
+                'avg_cost_cache_activity_count',
+                'avg_cost_cache_max_trade_id',
+                'avg_cost_cache_max_activity_id',
+                'avg_cost_cache_updated_at',
+            ])
             db_service.save_copy_trading_scenarios(analysis_run, copy_analysis.get("scenarios", []))
 
         logger.info(f"Completed data fetch for wallet {address}")

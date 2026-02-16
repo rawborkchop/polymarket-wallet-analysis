@@ -1,26 +1,26 @@
 """
-P&L Calculator - SINGLE SOURCE OF TRUTH for P&L calculation.
+P&L Calculator — re-exports from the calculators package.
 
-This module re-exports the SOLID-compliant calculator from the calculators package.
-For direct use of the calculator classes, import from wallet_analysis.calculators.
-
-Formula: P&L = (sells + redeems + merges + rewards) - (buys + splits)
-
-IMPORTANT:
-- Trades table contains only actual BUY/SELL trades (NO redeems as fake sells)
-- Activities table contains REDEEM, SPLIT, MERGE, REWARD
-- This calculator combines both for accurate P&L
+The default calculator is now CostBasisPnLCalculator (WACB method).
+For the legacy cash flow method, use calculate_wallet_pnl_cashflow().
 """
 
-# Re-export from the calculators package for backward compatibility
 from .calculators.pnl_calculator import (
     calculate_wallet_pnl,
     calculate_wallet_pnl_filtered,
+    calculate_wallet_pnl_cashflow,
+    AvgCostBasisCalculator,
     PnLCalculator,
+    CashFlowPnLCalculator,
 )
+from .calculators.cost_basis_calculator import CostBasisPnLCalculator
 
 __all__ = [
     'calculate_wallet_pnl',
     'calculate_wallet_pnl_filtered',
+    'calculate_wallet_pnl_cashflow',
+    'AvgCostBasisCalculator',
     'PnLCalculator',
+    'CashFlowPnLCalculator',
+    'CostBasisPnLCalculator',
 ]

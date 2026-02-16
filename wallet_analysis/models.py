@@ -46,9 +46,16 @@ class Market(models.Model):
     icon = models.URLField(blank=True)
     end_date = models.DateField(null=True, blank=True)
 
+    # Neg-risk grouping
+    neg_risk = models.BooleanField(default=False)
+    neg_risk_market_id = models.CharField(
+        max_length=66, blank=True, default='', db_index=True,
+        help_text='Condition-id of the parent neg-risk market (from CLOB API).'
+    )
+
     # Resolution data
     resolved = models.BooleanField(default=False)
-    winning_outcome = models.CharField(max_length=100, blank=True)
+    winning_outcome = models.CharField(max_length=100, blank=True, default='')
     resolution_timestamp = models.IntegerField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -97,13 +104,18 @@ class Trade(models.Model):
         indexes = [
             models.Index(fields=['wallet', 'timestamp']),
             models.Index(fields=['wallet', 'side']),
+            models.Index(fields=['wallet', 'market']),
+            models.Index(fields=['wallet', 'side', 'market']),
         ]
         # Unique constraint to prevent duplicate trades
         # Includes wallet and market to handle same asset traded in different contexts
         constraints = [
             models.UniqueConstraint(
-                fields=['wallet', 'transaction_hash', 'asset', 'market', 'side'],
-                name='unique_trade_v2'
+                fields=[
+                    'wallet', 'transaction_hash', 'asset', 'market', 'side',
+                    'timestamp', 'outcome', 'price', 'size', 'total_value'
+                ],
+                name='unique_trade_v3'
             )
         ]
 
@@ -140,6 +152,8 @@ class Activity(models.Model):
     datetime = models.DateTimeField()
     size = models.DecimalField(max_digits=20, decimal_places=6)
     usdc_size = models.DecimalField(max_digits=20, decimal_places=6)
+    asset = models.CharField(max_length=100, blank=True, default='')
+    outcome = models.CharField(max_length=50, blank=True, default='')
     title = models.CharField(max_length=500, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -150,13 +164,17 @@ class Activity(models.Model):
         indexes = [
             models.Index(fields=['wallet', 'activity_type']),
             models.Index(fields=['wallet', 'timestamp']),
+            models.Index(fields=['wallet', 'activity_type', 'market']),
         ]
         # Unique constraint to prevent duplicate activities (includes wallet
         # so the same on-chain activity can exist for different tracked wallets)
         constraints = [
             models.UniqueConstraint(
-                fields=['wallet', 'transaction_hash', 'activity_type', 'size', 'usdc_size'],
-                name='unique_activity_v2'
+                fields=[
+                    'wallet', 'transaction_hash', 'activity_type', 'market',
+                    'timestamp', 'size', 'usdc_size'
+                ],
+                name='unique_activity_v3'
             )
         ]
 
@@ -250,7 +268,7 @@ class AnalysisRun(models.Model):
     wallet = models.ForeignKey(
         Wallet, on_delete=models.CASCADE, related_name='analysis_runs'
     )
-    timestamp = models.DateTimeField(default=timezone.now)
+    timestamp = models.DateTimeField(default=timezone.now, db_index=True)
 
     # Analysis parameters
     period_start_hours_ago = models.IntegerField()
@@ -281,6 +299,14 @@ class AnalysisRun(models.Model):
     )
     subgraph_total_positions = models.IntegerField(null=True, blank=True)
 
+    # Cached AvgCost replay output (per period) for fast wallet stats responses.
+    avg_cost_cache = models.JSONField(null=True, blank=True)
+    avg_cost_cache_trade_count = models.IntegerField(null=True, blank=True)
+    avg_cost_cache_activity_count = models.IntegerField(null=True, blank=True)
+    avg_cost_cache_max_trade_id = models.IntegerField(null=True, blank=True)
+    avg_cost_cache_max_activity_id = models.IntegerField(null=True, blank=True)
+    avg_cost_cache_updated_at = models.DateTimeField(null=True, blank=True)
+
     # Performance metrics
     win_rate_percent = models.DecimalField(
         max_digits=6, decimal_places=2, null=True, blank=True
@@ -294,6 +320,9 @@ class AnalysisRun(models.Model):
 
     class Meta:
         ordering = ['-timestamp']
+        indexes = [
+            models.Index(fields=['wallet', '-timestamp']),
+        ]
 
     def __str__(self):
         return f"Analysis {self.wallet} @ {self.timestamp}"

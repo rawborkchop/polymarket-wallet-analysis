@@ -30,8 +30,8 @@ class CashFlowEntry:
 
     @property
     def inflows(self) -> Decimal:
-        """Total money coming in: sells + redeems + merges + rewards + conversions"""
-        return self.sells + self.redeems + self.merges + self.rewards + self.conversions
+        """Total money coming in: sells + redeems + merges + rewards (NOT conversions)"""
+        return self.sells + self.redeems + self.merges + self.rewards
 
     @property
     def outflows(self) -> Decimal:

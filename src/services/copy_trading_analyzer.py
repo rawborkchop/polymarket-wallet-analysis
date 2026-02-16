@@ -137,6 +137,7 @@ class CopyTradingAnalyzer(IAnalyzer):
         split_cost = self._cash_flow.get("split_cost", 0)
         merge_revenue = self._cash_flow.get("merge_revenue", 0)
         reward_revenue = self._cash_flow.get("reward_revenue", 0)
+        conversion_revenue = self._cash_flow.get("conversion_revenue", 0)
 
         if self._use_percentage:
             # Percentage mode: slippage as % of price
@@ -155,14 +156,14 @@ class CopyTradingAnalyzer(IAnalyzer):
         # These happen at fixed rates, not market execution
 
         # Calculate P&L for the period's activity (from activity API)
-        period_original_pnl = (orig_sell_revenue + redeem_revenue + merge_revenue + reward_revenue) - (orig_buy_cost + split_cost)
-        period_copy_pnl = (copy_sell_revenue + redeem_revenue + merge_revenue + reward_revenue) - (copy_buy_cost + split_cost)
+        period_original_pnl = (orig_sell_revenue + redeem_revenue + merge_revenue + reward_revenue + conversion_revenue) - (orig_buy_cost + split_cost)
+        period_copy_pnl = (copy_sell_revenue + redeem_revenue + merge_revenue + reward_revenue + conversion_revenue) - (copy_buy_cost + split_cost)
 
         # Use period P&L calculated from trades and activities
         original_pnl = period_original_pnl
         copy_pnl = period_copy_pnl
 
-        total_volume = float(sum(t.total_value for t in trades))
+        total_volume = float(sum(t.size for t in trades))
         pnl_diff = copy_pnl - original_pnl
 
         return CopyTradingScenario(
@@ -285,7 +286,7 @@ class CopyTradingAnalyzer(IAnalyzer):
                     original_pnl += remaining_size * (0.0 - orig_avg_buy)
                     copy_pnl += remaining_size * (0.0 - copy_avg_buy)
 
-        total_volume = float(sum(t.total_value for t in trades))
+        total_volume = float(sum(t.size for t in trades))
         pnl_diff = copy_pnl - original_pnl
 
         return CopyTradingScenario(

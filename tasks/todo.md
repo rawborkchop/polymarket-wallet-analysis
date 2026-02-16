@@ -225,3 +225,75 @@ P&L esperado: ($60 + $30) - $100 = -$10
 - [ ] Verificar pnl_by_market filtrado correctamente
 - [ ] Verificar CONVERSION aparece en fetch de actividades
 - [ ] Verificar loops de paginación respetan MAX_PAGINATION_ITERATIONS
+
+---
+
+## Optimización de Cuellos de Botella en BD (2026-02-11)
+
+### Estado: COMPLETADO ✓
+
+### Cambios realizados
+
+| # | Severidad | Optimización | Archivo | Estado |
+|---|-----------|-------------|---------|--------|
+| 1 | CRITICAL | Eliminar COUNT queries en save_trades() y save_activities() | `services.py` | ✓ |
+| 2 | HIGH | bulk_create en save_positions_from_subgraph() | `services.py` | ✓ |
+| 3 | HIGH | bulk_create + market_cache en save_current_positions() | `services.py` | ✓ |
+| 4 | HIGH | Eliminar doble carga en calculate_filtered() | `calculators/pnl_calculator.py` | ✓ |
+| 5 | MEDIUM | Batch market lookup en stats view (in_bulk) | `views.py` | ✓ |
+| 6 | LOW-MEDIUM | Bulk update/create en save_market_resolutions() | `services.py` | ✓ |
+| 7 | INFRA | PostgreSQL config + docker-compose | `settings.py`, `docker-compose.yml` | ✓ |
+
+### Verificación
+- [x] 14/14 tests passing (`python manage.py test wallet_analysis`)
+
+### Impacto estimado
+- **save_trades()**: Eliminados 2 COUNT queries por batch (O(N) cada uno). Para wallet con 50K trades + 10K nuevos: ~200 COUNT queries eliminados.
+- **save_activities()**: Mismo patrón, COUNT eliminados por batch.
+- **save_positions/current_positions**: N creates individuales → 1 bulk_create.
+- **save_market_resolutions()**: N update_or_create → 1 SELECT + 1 bulk_update + 1 bulk_create.
+- **calculate_filtered()**: 4 DB queries (2x trades + 2x activities) → 2 DB queries.
+- **stats view market lookup**: N queries → 1 query con in_bulk().
+
+---
+
+## Migrate PnL to Weighted Average Cost Basis (2026-02-14)
+
+### Estado: COMPLETADO ✓
+
+### Resumen
+Migrated from cash flow P&L (inflows - outflows) to weighted average cost basis (WACB), the industry standard used by Polymarket's Data API, PnL subgraph, and community tools. This enables per-position tracking, realized/unrealized PnL separation, and results that match Polymarket's UI.
+
+### Fases
+
+| # | Fase | Estado |
+|---|------|--------|
+| 1 | Add `asset`/`outcome` to Activity model | ✓ |
+| 2 | Core Position Tracker Engine (pure logic) | ✓ |
+| 3 | Cost Basis Calculator + Aggregators | ✓ |
+| 4 | Wire into existing system | ✓ |
+| 5 | Tests (14 existing + 16 new = 30 total) | ✓ |
+
+### Archivos nuevos
+- `wallet_analysis/calculators/position_tracker.py` — PositionState, RealizedPnLEvent, PositionTracker
+- `wallet_analysis/calculators/cost_basis_calculator.py` — CostBasisPnLCalculator
+- `wallet_analysis/calculators/cost_basis_aggregators.py` — CostBasisMarketAggregator, CostBasisDailyAggregator
+- `wallet_analysis/migrations/0007_add_asset_outcome_to_activity.py`
+
+### Archivos modificados
+- `wallet_analysis/models.py` — Added `asset`, `outcome` to Activity
+- `wallet_analysis/services.py` — Persist `asset`/`outcome` in save_activities()
+- `wallet_analysis/calculators/interfaces.py` — Added IPositionTracker
+- `wallet_analysis/calculators/pnl_calculator.py` — Added CashFlowPnLCalculator alias, cost basis default
+- `wallet_analysis/calculators/__init__.py` — Export new classes
+- `wallet_analysis/pnl_calculator.py` — Re-export new functions
+- `wallet_analysis/views.py` — Added unrealized_pnl, total_pnl, cash_flow_pnl, positions to response
+- `wallet_analysis/tasks.py` — Updated comment (import unchanged)
+- `wallet_analysis/tests.py` — 16 new tests for position tracker, cost basis calc, method comparison
+
+### Verificación
+- [x] All 30 tests pass (14 existing + 16 new)
+- [ ] Run migration: `python manage.py migrate`
+- [ ] Re-fetch a wallet to populate `asset`/`outcome` on activities
+- [ ] Compare cash_flow_pnl vs cost_basis realized_pnl for known wallets
+- [ ] Spot-check against Polymarket UI for a wallet with known positions

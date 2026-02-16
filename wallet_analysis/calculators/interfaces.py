@@ -63,6 +63,17 @@ class IPnLCalculator(ABC):
         pass
 
 
+class IPositionTracker(ABC):
+    """
+    Interface for position tracking / cost basis computation.
+    """
+
+    @abstractmethod
+    def process_events(self, trades: List[Any], activities: List[Any]) -> Any:
+        """Process trades and activities to compute per-position state."""
+        pass
+
+
 class IAggregator(ABC):
     """
     Interface for aggregating cash flow data.
